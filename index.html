@@ -506,20 +506,40 @@ async function loadStateNow() {
    Pantalla completa
    ========================================================= */
 function isFullscreen() {
-  return !!(document.fullscreenElement || document.webkitFullscreenElement);
+  return !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
 }
 
 function goFullscreen() {
-  if (isFullscreen()) return;
-  var el = $('app');
+  if (isFullscreen()) return true;
+  // La raíz del documento es lo más compatible en Chrome, Edge y Firefox.
+  var el = document.documentElement;
   try {
     var p = null;
     if (el.requestFullscreen) p = el.requestFullscreen({ navigationUI: 'hide' });
     else if (el.webkitRequestFullscreen) p = el.webkitRequestFullscreen();
+    else if (el.msRequestFullscreen) p = el.msRequestFullscreen();
+    else return false;
     // Nunca se espera: si el navegador deja la promesa pendiente,
     // el juego debe seguir funcionando igual.
-    if (p && typeof p.catch === 'function') p.catch(function () {});
-  } catch (e) { /* iOS no permite fullscreen de elementos */ }
+    if (p && typeof p.catch === 'function') {
+      p.catch(function () { onFullscreenBlocked(); });
+    }
+    return true;
+  } catch (e) {
+    onFullscreenBlocked();
+    return false;
+  }
+}
+
+var fsBlockedNotified = false;
+function onFullscreenBlocked() {
+  if (fsBlockedNotified) return;
+  fsBlockedNotified = true;
+  // Solo avisamos si el entorno lo bloquea de forma explícita
+  // (iframe sin allowfullscreen, por ejemplo). Si es falta de gesto, no molestamos.
+  if (document.fullscreenEnabled === false) {
+    toast('Este visor no permite pantalla completa');
+  }
 }
 
 /* =========================================================
@@ -577,18 +597,40 @@ document.addEventListener('DOMContentLoaded', function () {
   $('btn-save').addEventListener('click', saveStateNow);
   $('btn-load').addEventListener('click', loadStateNow);
 
-  // Primer gesto del usuario: pantalla completa + audio
-  function firstGesture() {
-    goFullscreen();
-    resumeAudio();
-    document.removeEventListener('pointerdown', firstGesture, true);
-    document.removeEventListener('keydown', firstGesture, true);
-  }
-  document.addEventListener('pointerdown', firstGesture, true);
-  document.addEventListener('keydown', firstGesture, true);
+  // Pantalla completa: los navegadores exigen un gesto del usuario.
+  // Se reintenta en cada interacción hasta que se consigue.
+  var fsEverEntered = false;
+  var fsUserExited = false;
 
-  // Se intenta igualmente al cargar (el navegador lo rechazará sin un toque,
-  // pero en una PWA instalada ya se abre a pantalla completa desde el inicio)
+  function unbindFs() {
+    ['pointerdown', 'pointerup', 'click', 'keydown', 'touchend'].forEach(function (ev) {
+      document.removeEventListener(ev, tryFs, true);
+    });
+  }
+
+  function tryFs() {
+    if (fsUserExited) return;
+    resumeAudio();
+    goFullscreen();
+  }
+
+  ['pointerdown', 'pointerup', 'click', 'keydown', 'touchend'].forEach(function (ev) {
+    document.addEventListener(ev, tryFs, true);
+  });
+
+  document.addEventListener('fullscreenchange', function () {
+    if (isFullscreen()) {
+      fsEverEntered = true;
+      unbindFs();
+    } else if (fsEverEntered) {
+      // Salió a propósito (Esc): no volvemos a forzarla
+      fsUserExited = true;
+      unbindFs();
+    }
+    fitShell();
+  });
+
+  // Si ya se abre como app instalada, entra sin gesto
   goFullscreen();
 
   bootGame();
