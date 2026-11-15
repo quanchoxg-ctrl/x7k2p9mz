@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#000000">
+<meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
+<meta name="googlebot" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Pokemon Yellow</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;background:#000;overflow:hidden;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;font-family:system-ui,sans-serif}
+#app{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding-top:1vh}
+#rom-loader{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(135deg,#1a1a2e,#16213e,#0f3460);z-index:100;padding:20px}
+.pokeball{width:70px;height:70px;border-radius:50%;background:linear-gradient(180deg,#ff1a1a 0%,#ff1a1a 45%,#fff 45%,#fff 55%,#333 55%,#333 100%);margin-bottom:16px;position:relative;animation:pb 2s ease-in-out infinite}
+.pokeball::after{content:'';position:absolute;width:20px;height:20px;background:#fff;border:3px solid #333;border-radius:50%;top:50%;left:50%;transform:translate(-50%,-50%)}
+@keyframes pb{0%,100%{transform:rotate(0)}50%{transform:rotate(10deg)}}
+#rom-loader h1{color:#ffd700;font-size:1.6em;margin-bottom:6px;text-shadow:2px 2px 4px rgba(0,0,0,.5)}
+#rom-loader p{color:#aaa;font-size:.85em;margin-bottom:20px}
+#load-status{color:#888;font-size:.75em;min-height:20px;max-width:90vw;word-break:break-all;text-align:center}
+#game-container{display:none;width:100%;height:100%;flex-direction:column;align-items:center;justify-content:space-between}
+#game-container.active{display:flex}
+#toolbar{width:100%;max-width:500px;display:flex;justify-content:flex-end;gap:4px;padding:2px 4px;flex-shrink:0}
+.tb{background:rgba(40,40,40,.7);border:1px solid #555;border-radius:6px;color:#999;padding:3px 10px;font-size:11px;cursor:pointer;touch-action:manipulation}
+.tb:active{background:rgba(70,70,70,.9);color:#fff}
+#screen-wrapper{flex-shrink:0;display:flex;align-items:flex-start;justify-content:center;width:100%;overflow:hidden;padding:0px 4px}
+#lcd{image-rendering:pixelated;image-rendering:crisp-edges;width:100%;max-width:min(100vw - 8px,500px);aspect-ratio:160/144;background:#9bbc0f;border:3px solid #444;border-radius:8px;box-shadow:0 0 30px rgba(0,0,0,.5)}
+#controls{width:100%;max-width:500px;padding:0px 15px 6px;display:flex;justify-content:space-between;align-items:flex-end;flex-shrink:0;z-index:10}
+.dpad-container{position:relative;width:130px;height:130px}
+.dpad-btn{position:absolute;background:rgba(50,50,50,.85);border:2px solid #222;border-radius:6px;display:flex;align-items:center;justify-content:center;color:#bbb;font-size:16px;touch-action:none;transition:background .08s}
+.dpad-btn.pressed{background:rgba(90,90,90,.95)}
+.dpad-up{width:42px;height:42px;top:0;left:44px}
+.dpad-down{width:42px;height:42px;bottom:0;left:44px}
+.dpad-left{width:42px;height:42px;top:44px;left:0}
+.dpad-right{width:42px;height:42px;top:44px;right:0}
+.dpad-center{position:absolute;width:42px;height:42px;top:44px;left:44px;background:rgba(40,40,40,.7);border-radius:6px}
+.action-buttons{display:flex;gap:10px;align-items:center;height:90px}
+.ab-btn{width:58px;height:58px;border-radius:50%;border:3px solid #222;font-size:17px;font-weight:bold;display:flex;align-items:center;justify-content:center;touch-action:none;transition:transform .08s;background:linear-gradient(135deg,#e74c3c,#c0392b);color:#fff}
+.ab-btn.pressed{transform:scale(.9)}
+.btn-b{transform:translateY(10px)}
+.bottom-bar{width:100%;max-width:500px;display:flex;justify-content:center;gap:28px;padding-bottom:4px;flex-shrink:0}
+.sys-btn{padding:8px 18px;background:rgba(60,60,60,.8);border:2px solid #444;border-radius:20px;color:#bbb;font-size:11px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;touch-action:none;transition:background .08s}
+.sys-btn.pressed{background:rgba(90,90,90,.9)}
+@media(orientation:landscape)and(max-height:500px){
+#controls{padding:4px 20px 8px}
+.dpad-container{width:100px;height:100px}.dpad-btn{width:34px;height:34px}
+.dpad-up{top:0;left:33px}.dpad-down{bottom:0;left:33px}.dpad-left{top:33px;left:0}.dpad-right{top:33px;right:0}
+.dpad-center{top:33px;left:33px;width:34px;height:34px}
+.ab-btn{width:48px;height:48px;font-size:14px}
+.bottom-bar{gap:18px;padding-bottom:4px}.sys-btn{padding:5px 12px;font-size:10px}
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="rom-loader">
+    <div class="pokeball"></div>
+    <h1>Pokemon Yellow</h1>
+    <p>Cargando...</p>
+    <div id="load-status"></div>
+  </div>
+  <div id="game-container">
+    <div id="toolbar">
+      <button class="tb" onclick="toggleFullscreen()">Fullscreen</button>
+      <button class="tb" onclick="location.reload()">Reset</button>
+    </div>
+    <div id="screen-wrapper">
+      <canvas id="lcd" width="160" height="144"></canvas>
+    </div>
+    <div id="controls">
+      <div class="dpad-container">
+        <div class="dpad-btn dpad-up" data-key="up">&#9650;</div>
+        <div class="dpad-btn dpad-down" data-key="down">&#9660;</div>
+        <div class="dpad-btn dpad-left" data-key="left">&#9664;</div>
+        <div class="dpad-btn dpad-right" data-key="right">&#9654;</div>
+        <div class="dpad-center"></div>
+      </div>
+      <div class="action-buttons">
+        <div class="ab-btn btn-b" data-key="b">B</div>
+        <div class="ab-btn" data-key="a">A</div>
+      </div>
+    </div>
+    <div class="bottom-bar">
+      <div class="sys-btn" data-key="select">Select</div>
+      <div class="sys-btn" data-key="start">Start</div>
+    </div>
+  </div>
+</div>
+
+<script src="GameBoyCore.js"></script>
+<script src="GameBoyIO.js"></script>
+<script>
+"use strict";
+
+// Debug function expected by GameBoyIO.js
+function cout(msg, level) { console.log('[GB]', msg); }
+
+// Storage functions expected by GameBoyIO.js
+function findValue(name) {
+  var val = localStorage.getItem(name);
+  if (val === null) return null;
+  try { return JSON.parse(val); } catch(e) { return val; }
+}
+function setValue(name, value) {
+  localStorage.setItem(name, JSON.stringify(value));
+}
+function deleteValue(name) {
+  localStorage.removeItem(name);
+}
+
+// Helper functions expected by GameBoyIO.js
+function arrayToBase64(arr) {
+  var str = '';
+  for (var i = 0; i < arr.length; i++) str += String.fromCharCode(arr[i]);
+  return btoa(str);
+}
+function base64ToArray(str) {
+  var s = atob(str);
+  var arr = new Uint8Array(s.length);
+  for (var i = 0; i < s.length; i++) arr[i] = s.charCodeAt(i);
+  return arr;
+}
+function to_little_endian_dword(val) {
+  return String.fromCharCode(val & 0xFF, (val >> 8) & 0xFF, (val >> 16) & 0xFF, (val >> 24) & 0xFF);
+}
+function to_byte(val) { return String.fromCharCode(val & 0xFF); }
+
+// Audio using Web Audio API
+var audioCtx = null;
+var audioScriptNode = null;
+var audioBufferQueue = [];
+var audioVolume = 1;
+
+function XAudioServer(channels, sampleRate, bufferedAmount, lowWaterMark, highWaterMark, volume, errorCallback) {
+  this.channels = channels;
+  this.sampleRate = sampleRate;
+  this.volume = volume || 1;
+  this.initialized = true;
+  this.stopped = false;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
+    var self = this;
+    var bufferSize = 4096;
+    audioScriptNode = audioCtx.createScriptProcessor(bufferSize, 0, 2);
+    audioScriptNode.onaudioprocess = function(e) {
+      var left = e.outputBuffer.getChannelData(0);
+      var right = e.outputBuffer.getChannelData(1);
+      var len = left.length;
+      for (var i = 0; i < len; i++) {
+        if (audioBufferQueue.length > 0) {
+          var sample = audioBufferQueue.shift();
+          left[i] = sample[0] * self.volume;
+          right[i] = sample[1] * self.volume;
+        } else {
+          left[i] = 0;
+          right[i] = 0;
+        }
+      }
+    };
+    audioScriptNode.connect(audioCtx.destination);
+  } catch(e) {
+    console.warn('Audio init failed:', e);
+  }
+}
+XAudioServer.prototype.initialize = function() {};
+XAudioServer.prototype.start = function() {
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+};
+XAudioServer.prototype.stop = function() { this.stopped = true; };
+XAudioServer.prototype.writeAudio = function(buffer) { this.writeAudioNoCallback(buffer); return buffer.length; };
+XAudioServer.prototype.writeAudioNoCallback = function(buffer) {
+  if (!audioCtx || this.stopped) return;
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  for (var i = 0; i < buffer.length; i += 2) {
+    audioBufferQueue.push([buffer[i], buffer[i+1]]);
+  }
+  // Limit buffer to prevent lag
+  if (audioBufferQueue.length > 16384) {
+    audioBufferQueue.splice(0, audioBufferQueue.length - 8192);
+  }
+};
+XAudioServer.prototype.flushAudio = function() { audioBufferQueue = []; };
+XAudioServer.prototype.cancel = function() { audioBufferQueue = []; };
+XAudioServer.prototype.changeVolume = function(v) { this.volume = v; audioVolume = v; };
+XAudioServer.prototype.remainingBuffer = function() { return audioBufferQueue.length; };
+Object.defineProperty(XAudioServer.prototype, 'samplesAvailable', { get: function() { return Math.floor(audioBufferQueue.length / 2); } });
+
+// Resume AudioContext on first touch (required by browsers)
+function resumeAudio() {
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+// =====================================================
+// Input
+// =====================================================
+function setInput(key, pressed) {
+  if (!gameboy) return;
+  const el = document.querySelector('[data-key="'+key+'"]');
+  if (el) el.classList.toggle('pressed', pressed);
+
+  const keyMap = { right:0, left:1, up:2, down:3, a:4, b:5, select:6, start:7 };
+  const bit = keyMap[key];
+  if (bit !== undefined) gameboy.JoyPadEvent(bit, pressed);
+}
+
+function setupInput() {
+  document.querySelectorAll('[data-key]').forEach(btn => {
+    const key = btn.dataset.key;
+    btn.addEventListener('touchstart', e => { e.preventDefault(); setInput(key, true); }, {passive:false});
+    btn.addEventListener('touchend', e => { e.preventDefault(); setInput(key, false); }, {passive:false});
+    btn.addEventListener('touchcancel', e => { e.preventDefault(); setInput(key, false); }, {passive:false});
+    btn.addEventListener('mousedown', e => { e.preventDefault(); setInput(key, true); });
+    btn.addEventListener('mouseup', e => { e.preventDefault(); setInput(key, false); });
+    btn.addEventListener('mouseleave', () => setInput(key, false));
+  });
+  const KB = {
+    'ArrowUp':'up','ArrowDown':'down','ArrowLeft':'left','ArrowRight':'right',
+    'KeyZ':'a','KeyX':'b','ShiftLeft':'select','Enter':'start','Space':'a'
+  };
+  document.addEventListener('keydown', e => { const k=KB[e.code]; if(k){e.preventDefault();setInput(k,true);} });
+  document.addEventListener('keyup', e => { const k=KB[e.code]; if(k){e.preventDefault();setInput(k,false);} });
+}
+
+// =====================================================
+// Fullscreen + Palette
+// =====================================================
+function toggleFullscreen() {
+  const el = document.getElementById('app');
+  if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+    (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+  } else {
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  }
+}
+
+// =====================================================
+// Auto-load ROM
+// =====================================================
+// Auto-load ROM
+// =====================================================
+async function autoLoadROM() {
+  const status = document.getElementById('load-status');
+  try {
+    status.textContent = 'Cargando yellow.gbc...';
+    console.log('[1/3] Fetching ROM...');
+
+    const resp = await fetch('yellow.gbc');
+    if (!resp.ok) throw new Error('ROM no encontrada');
+    const buf = await resp.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let rom = '';
+    for (let i = 0; i < bytes.length; i++) rom += String.fromCharCode(bytes[i]);
+    console.log('[2/3] ROM loaded, size:', rom.length);
+
+    const canvas = document.getElementById('lcd');
+    console.log('[3/3] Starting emulator...');
+
+    document.getElementById('rom-loader').style.display = 'none';
+    document.getElementById('game-container').classList.add('active');
+
+    start(canvas, rom);
+  } catch(err) {
+    console.error('Error:', err);
+    status.textContent = 'Error: ' + err.message;
+    status.style.color = '#e74c3c';
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  setupInput();
+  document.addEventListener('touchmove', e => e.preventDefault(), {passive:false});
+  autoLoadROM();
+
+  // Auto fullscreen + resume audio on first tap
+  let fsDone = false;
+  function tryFullscreen() {
+    resumeAudio();
+    if (fsDone) return;
+    const el = document.getElementById('app');
+    if (el.requestFullscreen) el.requestFullscreen().catch(()=>{});
+    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+    fsDone = true;
+  }
+  document.addEventListener('touchstart', tryFullscreen, {once: true});
+  document.addEventListener('click', tryFullscreen, {once: true});
+
+  // Save SRAM when leaving page
+  window.addEventListener('beforeunload', () => {
+    if (gameboy && gameboy.cBATT) {
+      try { saveSRAM(); } catch(e) {}
+    }
+  });
+});
+</script>
+</body>
+</html>
