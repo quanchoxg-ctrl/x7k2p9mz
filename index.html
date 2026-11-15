@@ -190,8 +190,6 @@ html,body{
   <div id="topbar">
     <button class="tb" id="btn-save" disabled>Guardar</button>
     <button class="tb" id="btn-load" disabled>Cargar</button>
-    <button class="tb" id="btn-fs">Pantalla completa</button>
-    <button class="tb" id="btn-close" disabled>Cerrar</button>
   </div>
 
   <div id="stage">
@@ -396,7 +394,12 @@ function setupInput() {
   });
 
   document.addEventListener('visibilitychange', function () {
-    if (document.hidden && started && gameboy) { try { saveSRAM(); } catch (e) {} }
+    if (document.hidden) {
+      if (started && !paused) pauseGame();
+      try { saveSRAM(); } catch (e) {}
+    } else if (started && paused) {
+      resumeGame();
+    }
   });
   window.addEventListener('beforeunload', function () {
     if (started && gameboy) { try { saveSRAM(); } catch (e) {} }
@@ -448,17 +451,15 @@ function pauseGame() {
 }
 
 function resumeGame() {
-  if (!gameboy) return;
+  if (!gameboy || !started) return;
   resumeAudio();
   try { run(); } catch (e) {}
   paused = false;
-  started = true;
   setBar(true);
 }
 
 function setBar(active) {
   $('btn-save').disabled = !active;
-  $('btn-close').disabled = !active;
   $('btn-load').disabled = false;
 }
 
@@ -502,7 +503,7 @@ async function loadStateNow() {
 }
 
 /* =========================================================
-   Pantalla completa / cerrar
+   Pantalla completa
    ========================================================= */
 function isFullscreen() {
   return !!(document.fullscreenElement || document.webkitFullscreenElement);
@@ -519,29 +520,6 @@ function goFullscreen() {
     // el juego debe seguir funcionando igual.
     if (p && typeof p.catch === 'function') p.catch(function () {});
   } catch (e) { /* iOS no permite fullscreen de elementos */ }
-}
-
-function toggleFullscreen() {
-  if (isFullscreen()) {
-    try {
-      if (document.exitFullscreen) document.exitFullscreen().catch(function () {});
-      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
-    } catch (e) {}
-  } else {
-    goFullscreen();
-  }
-}
-
-function closeGame() {
-  if (isFullscreen()) {
-    try {
-      if (document.exitFullscreen) document.exitFullscreen().catch(function () {});
-      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
-    } catch (e) {}
-  }
-  pauseGame();
-  setBanner('En pausa · toca la pantalla para continuar', 0);
-  toast('Pausado');
 }
 
 /* =========================================================
@@ -598,13 +576,6 @@ document.addEventListener('DOMContentLoaded', function () {
 
   $('btn-save').addEventListener('click', saveStateNow);
   $('btn-load').addEventListener('click', loadStateNow);
-  $('btn-fs').addEventListener('click', toggleFullscreen);
-  $('btn-close').addEventListener('click', closeGame);
-
-  // Reanudar tocando la pantalla cuando está en pausa
-  $('gb').addEventListener('pointerdown', function () {
-    if (paused) { resumeGame(); setBanner(null); }
-  });
 
   // Primer gesto del usuario: pantalla completa + audio
   function firstGesture() {
@@ -615,6 +586,10 @@ document.addEventListener('DOMContentLoaded', function () {
   }
   document.addEventListener('pointerdown', firstGesture, true);
   document.addEventListener('keydown', firstGesture, true);
+
+  // Se intenta igualmente al cargar (el navegador lo rechazará sin un toque,
+  // pero en una PWA instalada ya se abre a pantalla completa desde el inicio)
+  goFullscreen();
 
   bootGame();
 });
