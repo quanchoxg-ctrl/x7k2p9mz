@@ -724,7 +724,6 @@ document.addEventListener('DOMContentLoaded', function () {
 
   document.addEventListener('fullscreenchange', onFsChange);
   document.addEventListener('webkitfullscreenchange', onFsChange);
-  document.addEventListener('fullscreenerror', function () { setFsChip(!isFullscreen()); });
 
   // En una PWA instalada ya se abre a pantalla completa desde el inicio.
   goFullscreen();
