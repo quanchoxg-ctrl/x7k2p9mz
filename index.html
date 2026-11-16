@@ -98,9 +98,16 @@ body{
   border-radius:5px 5px 5px 14px;
   box-shadow:0 0 0 2px #2a2a32,0 0 26px rgba(140,180,20,.12),inset 0 0 22px rgba(0,0,0,.28);
 }
+/* shader del LCD: dibuja el canvas real con la rejilla y los 4 verdes del DMG */
+#fx{
+  position:absolute;inset:0;width:100%;height:100%;display:none;
+  border-radius:5px 5px 5px 14px;pointer-events:none;background:#9bbc0f;
+  z-index:1;
+}
+.lcd-wrap.fx-on #fx{display:block}
 /* reflejo del cristal: el detalle mas reconocible del DMG */
 .lcd-wrap .glass{
-  position:absolute;inset:0;border-radius:5px 5px 5px 14px;pointer-events:none;
+  position:absolute;inset:0;border-radius:5px 5px 5px 14px;pointer-events:none;z-index:2;
   background:linear-gradient(118deg,
     rgba(255,255,255,.15) 0%,
     rgba(255,255,255,.055) 20%,
@@ -288,6 +295,7 @@ body{
         <div class="bezel-label">Dot Matrix with Stereo Sound</div>
         <div class="lcd-wrap">
           <canvas id="lcd" width="160" height="144"></canvas>
+          <canvas id="fx"></canvas>
           <span class="glass"></span>
         </div>
         <div class="bezel-foot"><span id="led"></span><span>Battery</span></div>
@@ -365,18 +373,36 @@ function to_byte(val) { return String.fromCharCode(val & 0xFF); }
 
 /* =========================================================
    Audio (Web Audio API)
+   El núcleo entrega unos 350 pares de muestras cada 8 ms; aquí se
+   guardan en un búfer circular y se consumen de forma continua.
+   Así no hay cortes ni el coste de mantener una cola de arrays.
    ========================================================= */
 var audioCtx = null;
 var audioScriptNode = null;
-var audioBufferQueue = [];
 var audioVolume = 1;
+
+var AUDIO_RING_FRAMES = 8192;               // ~186 ms a 44,1 kHz
+var AUDIO_TARGET_FRAMES = 4096;             // latencia objetivo (~93 ms)
+var audioRingL = new Float32Array(AUDIO_RING_FRAMES);
+var audioRingR = new Float32Array(AUDIO_RING_FRAMES);
+var audioWritePos = 0, audioReadPos = 0, audioCount = 0;
+var audioFrac = 0;                          // posición fraccionaria (remuestreo fino)
+var audioTrimmed = false;
+var audioConsumed = 0;                      // frames entregados a la salida
 
 function ensureAudio() {
   if (audioCtx && audioCtx.state !== 'closed') return audioCtx;
   audioScriptNode = null;
   var Ctor = window.AudioContext || window.webkitAudioContext;
   if (!Ctor) return null;
-  try { audioCtx = new Ctor({ sampleRate: 44100 }); } catch (e) { audioCtx = null; }
+  try {
+    // 44100 Hz es la frecuencia real del emulador (4194304 / 95).
+    audioCtx = new Ctor({ sampleRate: 44100 });
+  } catch (e) {
+    try { audioCtx = new Ctor(); } catch (e2) { audioCtx = null; }
+  }
+  audioWritePos = audioReadPos = audioCount = 0;
+  audioTrimmed = false;
   return audioCtx;
 }
 
@@ -384,23 +410,78 @@ function ensureAudioNode() {
   var ctx = ensureAudio();
   if (!ctx) return null;
   if (!audioScriptNode) {
-    audioScriptNode = ctx.createScriptProcessor(4096, 0, 2);
-    audioScriptNode.onaudioprocess = function (e) {
-      var left = e.outputBuffer.getChannelData(0);
-      var right = e.outputBuffer.getChannelData(1);
-      var len = left.length;
-      for (var i = 0; i < len; i++) {
-        if (audioBufferQueue.length > 0) {
-          var sample = audioBufferQueue.shift();
-          left[i] = sample[0] * audioVolume;
-          right[i] = sample[1] * audioVolume;
-        } else {
-          left[i] = 0;
-          right[i] = 0;
+    var node = ctx.createScriptProcessor(2048, 0, 2);
+    // Estado de los filtros (por canal). El núcleo entrega la señal
+    // desplazada en continua, así que primero se quita el nivel fijo y
+    // después se suavizan los agudos como en el altavoz del DMG.
+    var HP_R = 0.995;                       // ~35 Hz
+    var LP_A = 0.7417;                      // ~9,5 kHz a 44,1 kHz
+    var hpInL = 0, hpInR = 0, hpOutL = 0, hpOutR = 0;
+    var lpL = 0, lpR = 0;
+    var fade = 0;                           // evita chasquidos al quedarse sin datos
+    node.onaudioprocess = function (e) {
+      // La primera vez que suena, el búfer puede traer todo lo generado
+      // mientras el AudioContext estaba en pausa. Se recorta al objetivo
+      // para que la latencia no crezca con el tiempo.
+      if (!audioTrimmed) {
+        audioTrimmed = true;
+        if (audioCount > AUDIO_TARGET_FRAMES) {
+          audioReadPos = (audioReadPos + audioCount - AUDIO_TARGET_FRAMES) % AUDIO_RING_FRAMES;
+          audioCount = AUDIO_TARGET_FRAMES;
+          audioFrac = 0;
         }
       }
+      var outL = e.outputBuffer.getChannelData(0);
+      var outR = e.outputBuffer.getChannelData(1);
+      var n = outL.length;
+      var vol = audioVolume;
+      // Control de latencia: si el búfer se aleja del objetivo se consume
+      // un poco más rápido o más lento (±1 %, imperceptible en el tono).
+      var step = 1 + (audioCount - AUDIO_TARGET_FRAMES) * 2e-5;
+      if (step > 1.015) step = 1.015;
+      else if (step < 0.985) step = 0.985;
+      for (var i = 0; i < n; i++) {
+        var xl = 0, xr = 0;
+        if (audioCount > 1) {
+          // Interpolación lineal entre las dos muestras vecinas.
+          var i0 = audioReadPos;
+          var i1 = (i0 + 1) % AUDIO_RING_FRAMES;
+          var f = audioFrac;
+          xl = audioRingL[i0] + (audioRingL[i1] - audioRingL[i0]) * f;
+          xr = audioRingR[i0] + (audioRingR[i1] - audioRingR[i0]) * f;
+          audioFrac += step;
+          if (audioFrac >= 1) {
+            var adv = Math.floor(audioFrac);
+            audioFrac -= adv;
+            audioReadPos = (audioReadPos + adv) % AUDIO_RING_FRAMES;
+            audioCount -= adv;
+            audioConsumed += adv;
+          }
+          if (fade < 1) fade = Math.min(1, fade + 0.004);
+        } else if (audioCount === 1) {
+          xl = audioRingL[audioReadPos];
+          xr = audioRingR[audioReadPos];
+          audioReadPos = (audioReadPos + 1) % AUDIO_RING_FRAMES;
+          audioCount = 0;
+          audioFrac = 0;
+          audioConsumed++;
+          if (fade < 1) fade = Math.min(1, fade + 0.004);
+        } else {
+          audioFrac = 0;
+          if (fade > 0) fade = Math.max(0, fade - 0.004);
+        }
+        var yl = xl - hpInL + HP_R * hpOutL;
+        hpInL = xl; hpOutL = yl;
+        var yr = xr - hpInR + HP_R * hpOutR;
+        hpInR = xr; hpOutR = yr;
+        lpL += LP_A * (yl - lpL);
+        lpR += LP_A * (yr - lpR);
+        outL[i] = lpL * vol * fade * 0.9;
+        outR[i] = lpR * vol * fade * 0.9;
+      }
     };
-    audioScriptNode.connect(ctx.destination);
+    audioScriptNode = node;
+    node.connect(ctx.destination);
   }
   return audioScriptNode;
 }
@@ -422,17 +503,34 @@ XAudioServer.prototype.start = function () {
 XAudioServer.prototype.stop = function () { this.stopped = true; };
 XAudioServer.prototype.writeAudio = function (buffer) { this.writeAudioNoCallback(buffer); return buffer.length; };
 XAudioServer.prototype.writeAudioNoCallback = function (buffer) {
-  if (!audioCtx || this.stopped) return;
-  if (audioCtx.state === 'suspended') audioCtx.resume();
-  for (var i = 0; i < buffer.length; i += 2) audioBufferQueue.push([buffer[i], buffer[i + 1]]);
-  if (audioBufferQueue.length > 16384) audioBufferQueue.splice(0, audioBufferQueue.length - 8192);
+  if (!buffer || this.stopped) return;
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  var frames = buffer.length >> 1;
+  if (frames <= 0) return;
+  // Si el búfer se llena, se descarta lo más viejo: la latencia nunca
+  // supera el tamaño del anillo.
+  var overflow = audioCount + frames - AUDIO_RING_FRAMES;
+  if (overflow > 0) {
+    audioReadPos = (audioReadPos + overflow) % AUDIO_RING_FRAMES;
+    audioCount -= overflow;
+  }
+  var w = audioWritePos;
+  for (var i = 0, s = 0; i < frames; i++, s += 2) {
+    audioRingL[w] = buffer[s];
+    audioRingR[w] = buffer[s + 1];
+    w = (w + 1) % AUDIO_RING_FRAMES;
+  }
+  audioWritePos = w;
+  audioCount += frames;
 };
-XAudioServer.prototype.flushAudio = function () { audioBufferQueue = []; };
-XAudioServer.prototype.cancel = function () { audioBufferQueue = []; };
+XAudioServer.prototype.flushAudio = function () { audioReadPos = audioWritePos = audioCount = 0; };
+XAudioServer.prototype.cancel = function () { audioReadPos = audioWritePos = audioCount = 0; };
 XAudioServer.prototype.changeVolume = function (v) { this.volume = v; audioVolume = v; };
-XAudioServer.prototype.remainingBuffer = function () { return audioBufferQueue.length; };
+// El núcleo trabaja en muestras intercaladas (L,R), así que se devuelve
+// el doble de frames. El control de flujo lo lleva startClockServo().
+XAudioServer.prototype.remainingBuffer = function () { return audioCount * 2; };
 Object.defineProperty(XAudioServer.prototype, 'samplesAvailable', {
-  get: function () { return Math.floor(audioBufferQueue.length / 2); }
+  get: function () { return audioCount; }
 });
 
 function resumeAudio() {
@@ -492,6 +590,12 @@ function setupInput() {
   document.addEventListener('keyup', function (e) {
     var k = KEYMAP[e.code];
     if (k) { e.preventDefault(); setInput(k, false); }
+  });
+
+  // En móvil el AudioContext nace en pausa hasta el primer gesto.
+  // Se reanuda en cualquier toque o tecla, sin bloquear los controles.
+  ['pointerdown', 'touchend', 'keydown'].forEach(function (ev) {
+    document.addEventListener(ev, resumeAudio, { passive: true });
   });
 
   document.addEventListener('visibilitychange', function () {
@@ -555,12 +659,43 @@ function syncRomState() {
 /* =========================================================
    Arranque automático
    ========================================================= */
+// El temporizador del navegador no corre siempre a 8 ms exactos, así que
+// cada segundo se mide cuánto audio se genera y se ajustan los ciclos por
+// iteración para producir justo 44.100 muestras/s. El tono no cambia y el
+// búfer se mantiene estable. (El control de flujo propio del núcleo se
+// desactiva para que no compita con este.)
+var clockServoTimer = null;
+function startClockServo() {
+  if (!gameboy) return;
+  gameboy.bufferContainAmount = 0;
+  if (clockServoTimer) clearInterval(clockServoTimer);
+  var lastTime = performance.now();
+  var lastCount = audioCount;
+  var lastConsumed = audioConsumed;
+  clockServoTimer = setInterval(function () {
+    var now = performance.now();
+    var dt = (now - lastTime) / 1000;
+    if (dt < 0.25 || !gameboy || !started || paused) {
+      lastTime = now; lastCount = audioCount; lastConsumed = audioConsumed;
+      return;
+    }
+    var prod = ((audioCount - lastCount) + (audioConsumed - lastConsumed)) / dt;
+    lastTime = now; lastCount = audioCount; lastConsumed = audioConsumed;
+    if (!isFinite(prod) || prod < 10000 || prod > 120000) return;
+    var ratio = Math.pow(44100 / prod, 0.5);
+    ratio = Math.max(0.98, Math.min(1.02, ratio));
+    gameboy.CPUCyclesTotalBase = Math.round(gameboy.CPUCyclesTotalBase * ratio);
+    gameboy.CPUCyclesTotal = gameboy.CPUCyclesTotalBase;
+  }, 1000);
+}
+
 async function bootGame() {
   setBanner('Cargando…', 0);
   try {
     var rom = await fetchRom();
     setBanner('Iniciando…', 0);
     start($('lcd'), rom);
+    startClockServo();
     started = true;
     paused = false;
     setBar(true);
@@ -568,7 +703,7 @@ async function bootGame() {
     // Si la página se abrió en horizontal en un móvil, el aviso de rotación
     // ya está tapando el juego: se queda en pausa hasta que se gire.
     if ($('rotate').classList.contains('show')) pauseGame();
-    setBanner('Toca la pantalla para pantalla completa', 3600);
+    if (!isInstalledApp()) setBanner('Toca la pantalla para pantalla completa', 3600);
   } catch (err) {
     setBanner('Error: ' + err.message, 0, true);
   }
@@ -627,6 +762,7 @@ async function loadStateNow() {
     gameboy.openMBC = openSRAM;
     gameboy.openRTC = openRTC;
     gameboy.returnFromState(st);
+    startClockServo();
     run();
     started = true;
     paused = false;
@@ -646,6 +782,17 @@ function isFullscreen() {
   return !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
 }
 
+// Instalada en la pantalla de inicio se abre ya a pantalla completa: no hay
+// que pedir la API (y Chrome no muestra su aviso de "arrastra desde arriba").
+function isInstalledApp() {
+  try {
+    if (window.navigator.standalone === true) return true;
+    if (!window.matchMedia) return false;
+    return window.matchMedia('(display-mode: fullscreen)').matches ||
+           window.matchMedia('(display-mode: standalone)').matches;
+  } catch (e) { return false; }
+}
+
 // El botón de respaldo solo se muestra cuando el intento automático no funcionó.
 function setFsChip(show) {
   var b = $('btn-fs');
@@ -653,6 +800,7 @@ function setFsChip(show) {
 }
 
 function goFullscreen() {
+  if (isInstalledApp()) { setFsChip(false); return true; }
   if (isFullscreen()) { setFsChip(false); return true; }
   // La raíz del documento es lo más compatible en Chrome, Edge y Firefox.
   var el = document.documentElement;
@@ -764,6 +912,155 @@ function toast(msg) {
 }
 
 /* =========================================================
+   Shader del LCD: verdes del DMG, rejilla de puntos y sangrado
+   ========================================================= */
+var fxCanvas = null, fxGl = null, fxProgram = null, fxTex = null;
+var fxTexSizeLoc = null, fxFailed = false;
+
+var FX_VERT = [
+  'attribute vec2 aPos;',
+  'varying vec2 vUv;',
+  'void main() {',
+  '  vUv = vec2(aPos.x * 0.5 + 0.5, aPos.y * 0.5 + 0.5);',
+  '  gl_Position = vec4(aPos, 0.0, 1.0);',
+  '}'
+].join('\n');
+
+var FX_FRAG = [
+  'precision mediump float;',
+  'varying vec2 vUv;',
+  'uniform sampler2D uTex;',
+  'uniform vec2 uTexSize;',
+  'const vec3 DMG0 = vec3(0.059, 0.220, 0.059);',   // #0f380f
+  'const vec3 DMG1 = vec3(0.188, 0.384, 0.188);',   // #306230
+  'const vec3 DMG2 = vec3(0.545, 0.675, 0.059);',   // #8bac0f
+  'const vec3 DMG3 = vec3(0.608, 0.737, 0.059);',   // #9bbc0f
+  'float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }',
+  'vec3 dmgPalette(float l) {',
+  '  float a = smoothstep(0.28, 0.34, l);',
+  '  float b = smoothstep(0.52, 0.58, l);',
+  '  float c = smoothstep(0.76, 0.82, l);',
+  '  vec3 col = mix(DMG0, DMG1, a);',
+  '  col = mix(col, DMG2, b);',
+  '  col = mix(col, DMG3, c);',
+  '  return col;',
+  '}',
+  'void main() {',
+  '  vec2 texel = 1.0 / uTexSize;',
+  // Centro exacto del píxel lógico (160x144) para no mezclar vecinos.
+  '  vec2 uv = (floor(vUv * uTexSize) + 0.5) * texel;',
+  '  float l = luma(texture2D(uTex, uv).rgb);',
+  // Sangrado del LCD: los píxeles vecinos iluminan un poco al actual.
+  '  float nb = luma(texture2D(uTex, uv + vec2(texel.x, 0.0)).rgb)',
+  '           + luma(texture2D(uTex, uv - vec2(texel.x, 0.0)).rgb)',
+  '           + luma(texture2D(uTex, uv + vec2(0.0, texel.y)).rgb)',
+  '           + luma(texture2D(uTex, uv - vec2(0.0, texel.y)).rgb);',
+  '  l = mix(l, nb * 0.25, 0.14);',
+  // Rejilla de puntos de la matriz (separación entre celdas).
+  '  vec2 cell = fract(vUv * uTexSize);',
+  '  vec2 edge = abs(cell - 0.5) * 2.0;',
+  '  float m = max(edge.x, edge.y);',
+  '  float grid = 1.0 - smoothstep(0.70, 1.0, m) * 0.20;',
+  // Viñeta suave y tinte cálido del panel.
+  '  vec2 d = vUv - 0.5;',
+  '  float vig = 1.0 - dot(d, d) * 0.30;',
+  '  vec3 col = dmgPalette(l) * grid * vig;',
+  '  col *= vec3(1.02, 1.0, 0.92);',
+  '  gl_FragColor = vec4(col, 1.0);',
+  '}'
+].join('\n');
+
+function initFX() {
+  fxCanvas = $('fx');
+  var src = $('lcd');
+  if (!fxCanvas || !src) return;
+  var gl = null;
+  try {
+    gl = fxCanvas.getContext('webgl', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false })
+      || fxCanvas.getContext('experimental-webgl');
+  } catch (e) { gl = null; }
+  if (!gl) { fxFailed = true; return; }   // sin WebGL queda el canvas 2D normal
+
+  function compile(type, source) {
+    var sh = gl.createShader(type);
+    gl.shaderSource(sh, source);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      console.warn('[GB] shader:', gl.getShaderInfoLog(sh));
+      return null;
+    }
+    return sh;
+  }
+  var vs = compile(gl.VERTEX_SHADER, FX_VERT);
+  var fs = compile(gl.FRAGMENT_SHADER, FX_FRAG);
+  if (!vs || !fs) { fxFailed = true; return; }
+  var prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.warn('[GB] shader link:', gl.getProgramInfoLog(prog));
+    fxFailed = true;
+    return;
+  }
+  gl.useProgram(prog);
+
+  var buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  var aPos = gl.getAttribLocation(prog, 'aPos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  fxTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, fxTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.uniform1i(gl.getUniformLocation(prog, 'uTex'), 0);
+
+  fxTexSizeLoc = gl.getUniformLocation(prog, 'uTexSize');
+  fxGl = gl;
+  fxProgram = prog;
+  fxCanvas.parentNode.classList.add('fx-on');
+  layoutFX();
+  requestAnimationFrame(fxLoop);
+}
+
+// El shader dibuja a resolución real del dispositivo, no a 160x144.
+function layoutFX() {
+  if (!fxCanvas || fxFailed) return;
+  if (!fxCanvas.parentNode.classList.contains('fx-on')) return;
+  var rect = fxCanvas.parentNode.getBoundingClientRect();
+  var dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+  var w = Math.round(rect.width * dpr);
+  var h = Math.round(rect.height * dpr);
+  if (w < 32 || h < 32) return;
+  var MAXW = 1440;
+  if (w > MAXW) { h = Math.round(h * MAXW / w); w = MAXW; }
+  if (fxCanvas.width !== w || fxCanvas.height !== h) {
+    fxCanvas.width = w;
+    fxCanvas.height = h;
+  }
+}
+
+function fxLoop() {
+  requestAnimationFrame(fxLoop);
+  if (!fxGl || fxFailed || document.hidden) return;
+  var gl = fxGl, src = $('lcd');
+  if (!src || !src.width || !src.height || !fxCanvas.width) return;
+  gl.viewport(0, 0, fxCanvas.width, fxCanvas.height);
+  gl.useProgram(fxProgram);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, fxTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+  gl.uniform2f(fxTexSizeLoc, src.width, src.height);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+/* =========================================================
    Escalado de la carcasa
    ========================================================= */
 function fitShell() {
@@ -779,6 +1076,7 @@ function fitShell() {
   // proporción original 360:610. Solo se reduce si no cabe a lo alto.
   var s = Math.min((vw - 4) / 360, (vh - bar - 4) / 610, 3);
   gb.style.transform = 'scale(' + (s > 0 ? s : 0.2) + ')';
+  layoutFX();
 }
 
 /* =========================================================
@@ -786,6 +1084,7 @@ function fitShell() {
    ========================================================= */
 document.addEventListener('DOMContentLoaded', function () {
   setupInput();
+  initFX();
   fitShell();
   updateRotateGate();
   window.addEventListener('resize', fitShell);
@@ -827,7 +1126,7 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function tryFs() {
-    if (fsUserExited || isFullscreen()) return;
+    if (isInstalledApp() || fsUserExited || isFullscreen()) return;
     // Con el aviso de rotación en pantalla no se secuestra el gesto:
     // pulsar "Continuar en horizontal" no debe forzar la vertical.
     if ($('rotate').classList.contains('show')) return;
