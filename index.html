@@ -238,6 +238,39 @@ body{
   box-shadow:0 8px 24px rgba(0,0,0,.5);
 }
 #toast.show{opacity:1;transform:translate(-50%,0)}
+
+/* ---------- aviso de rotación (respaldo si el sistema no deja fijarla) ---------- */
+#rotate{
+  position:fixed;inset:0;z-index:80;display:none;
+  flex-direction:column;align-items:center;justify-content:center;gap:22px;
+  padding:32px 26px calc(32px + env(safe-area-inset-bottom,0px));
+  text-align:center;color:#ececf6;
+  background:radial-gradient(120% 80% at 50% 28%,#1c1d26 0%,#0a0a10 62%,#050508 100%);
+}
+#rotate.show{display:flex}
+#rotate .phone{
+  position:relative;width:72px;height:124px;border-radius:14px;
+  border:2px solid #7b7b8c;background:linear-gradient(160deg,#26262f,#14141a);
+  box-shadow:0 10px 30px rgba(0,0,0,.6),inset 0 0 0 2px rgba(0,0,0,.5);
+  animation:tip 2.8s ease-in-out infinite;
+}
+#rotate .phone::after{
+  content:'';position:absolute;left:50%;bottom:7px;width:24px;height:24px;
+  border-radius:50%;border:1px solid #6f6f80;transform:translateX(-50%);
+}
+@keyframes tip{
+  0%,18%{transform:rotate(90deg)}
+  52%,100%{transform:rotate(0deg)}
+}
+#rotate h2{font:700 17px/1.25 system-ui;letter-spacing:.02em}
+#rotate p{font:500 12.5px/1.5 system-ui;color:#a8a8ba;max-width:262px}
+#rotate button{
+  appearance:none;border:1px solid #33333f;background:#16161d;color:#b9b9c8;
+  font:600 10.5px/1 system-ui;letter-spacing:.09em;text-transform:uppercase;
+  padding:11px 18px;border-radius:8px;cursor:pointer;
+}
+#rotate button:hover{background:#22222e;color:#fff}
+@media (prefers-reduced-motion:reduce){#rotate .phone{animation:none;transform:rotate(0)}}
 </style>
 </head>
 <body>
@@ -288,6 +321,13 @@ body{
 </div>
 
 <div id="toast"></div>
+
+<div id="rotate" aria-hidden="true">
+  <div class="phone" aria-hidden="true"></div>
+  <h2>Pon el móvil en vertical</h2>
+  <p>Esta Game Boy solo se juega en vertical. Gira el dispositivo para seguir donde lo dejaste.</p>
+  <button id="rotate-skip" type="button">Continuar en horizontal</button>
+</div>
 
 <script src="GameBoyCore.js"></script>
 <script src="GameBoyIO.js"></script>
@@ -405,7 +445,8 @@ function resumeAudio() {
    ========================================================= */
 var $ = function (id) { return document.getElementById(id); };
 var KEY_STATE = 'PBY_FREEZE_V1';
-var ROM_URL = 'yellow.gbc';
+var KEY_ROM = 'PBY_FREEZE_ROM';
+var ROM_URL = 'amarillo.gb';
 var romString = null;
 var romBytes = null;
 var started = false;
@@ -485,6 +526,32 @@ async function fetchRom() {
   return romString;
 }
 
+// Identifica la ROM por su cabecera completa (título, código, versión y
+// sumas de comprobación). El nombre corto que expone el núcleo es el mismo
+// en todas las versiones de Pokémon Amarillo, así que no sirve para esto.
+function romId() {
+  if (!romBytes) return '';
+  var hex = '';
+  for (var i = 0x134; i <= 0x14F; i++) hex += ('0' + romBytes[i].toString(16)).slice(-2);
+  return romBytes.length + '-' + hex;
+}
+
+// Un estado congelado guarda la CPU, la PPU y los punteros de texto de una
+// ROM concreta. Al cambiar de versión (inglés -> español) ese estado deja
+// de ser válido, así que se descarta en cuanto arranca la ROM nueva.
+// La partida del juego (SRAM) sí se conserva: es el mismo juego.
+function syncRomState() {
+  var id = romId();
+  if (!id) return;
+  var prev = localStorage.getItem(KEY_ROM);
+  if (prev === id) return;
+  if (localStorage.getItem(KEY_STATE)) {
+    localStorage.removeItem(KEY_STATE);
+    toast('Partida congelada de la versión anterior descartada');
+  }
+  localStorage.setItem(KEY_ROM, id);
+}
+
 /* =========================================================
    Arranque automático
    ========================================================= */
@@ -497,6 +564,10 @@ async function bootGame() {
     started = true;
     paused = false;
     setBar(true);
+    syncRomState();
+    // Si la página se abrió en horizontal en un móvil, el aviso de rotación
+    // ya está tapando el juego: se queda en pausa hasta que se gire.
+    if ($('rotate').classList.contains('show')) pauseGame();
     setBanner('Toca la pantalla para pantalla completa', 3600);
   } catch (err) {
     setBanner('Error: ' + err.message, 0, true);
@@ -529,6 +600,7 @@ function setBar(active) {
 function saveStateNow() {
   if (!gameboy || !GameBoyEmulatorPlaying()) { toast('El juego no está en marcha'); return; }
   try {
+    syncRomState();
     var st = gameboy.saveState();
     st[0] = null;                       // la ROM no se guarda: se recupera del servidor
     var json = JSON.stringify(st);
@@ -544,6 +616,10 @@ async function loadStateNow() {
   if (!json) { toast('No hay ningún estado guardado'); return; }
   try {
     await fetchRom();
+    if (localStorage.getItem(KEY_ROM) !== romId()) {
+      toast('Ese estado es de otra versión del juego');
+      return;
+    }
     var st = JSON.parse(json);
     st[0] = romBytes;
     clearLastEmulation();
@@ -556,6 +632,7 @@ async function loadStateNow() {
     paused = false;
     setBar(true);
     setBanner(null);
+    if ($('rotate').classList.contains('show')) pauseGame();
     toast('Estado cargado');
   } catch (e) {
     toast('No se pudo cargar: ' + e.message);
@@ -604,6 +681,57 @@ function onFullscreenBlocked(reason) {
   if (reason) console.warn('[GB] Pantalla completa no disponible:', reason);
   if (document.fullscreenEnabled === false) {
     toast('Este visor no permite pantalla completa');
+  }
+}
+
+/* =========================================================
+   Rotación: fija la vertical siempre que el navegador lo permita
+   ========================================================= */
+var rotateDismissed = false;
+
+function lockPortrait() {
+  // Android/Chrome solo permite fijar la orientación en pantalla completa.
+  try {
+    if (screen.orientation && screen.orientation.lock) {
+      var p = screen.orientation.lock('portrait');
+      if (p && p.catch) p.catch(function () {});
+    }
+  } catch (e) {}
+  // Navegadores antiguos.
+  try {
+    var legacy = screen.lockOrientation || screen.mozLockOrientation || screen.msLockOrientation;
+    if (legacy) legacy.call(screen, 'portrait');
+  } catch (e) {}
+}
+
+function unlockPortrait() {
+  try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (e) {}
+  try {
+    var legacy = screen.unlockOrientation || screen.mozUnlockOrientation || screen.msUnlockOrientation;
+    if (legacy) legacy.call(screen);
+  } catch (e) {}
+}
+
+function isCoarsePointer() {
+  return !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+}
+
+// Respaldo para iOS y visores que ignoran el bloqueo: en un móvil en
+// horizontal se tapa el juego y se pausa hasta girarlo. En un ordenador
+// (puntero fino) y en pantallas grandes nunca aparece.
+function updateRotateGate() {
+  var gate = $('rotate');
+  if (!gate) return;
+  var landscape = window.innerWidth > window.innerHeight;
+  var minSide = Math.min(window.innerWidth, window.innerHeight);
+  var show = isCoarsePointer() && landscape && minSide <= 560 && !rotateDismissed;
+  if (show === gate.classList.contains('show')) return;
+  gate.classList.toggle('show', show);
+  gate.setAttribute('aria-hidden', show ? 'false' : 'true');
+  if (show) {
+    if (started && !paused) pauseGame();
+  } else if (started && paused && !document.hidden) {
+    resumeGame();
   }
 }
 
@@ -659,17 +787,29 @@ function fitShell() {
 document.addEventListener('DOMContentLoaded', function () {
   setupInput();
   fitShell();
+  updateRotateGate();
   window.addEventListener('resize', fitShell);
-  window.addEventListener('orientationchange', function () { setTimeout(fitShell, 120); });
+  window.addEventListener('resize', updateRotateGate);
+  window.addEventListener('orientationchange', function () { setTimeout(fitShell, 120); setTimeout(updateRotateGate, 120); });
   if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', fitShell);
     window.visualViewport.addEventListener('scroll', fitShell);
   }
+  try {
+    if (screen.orientation && screen.orientation.addEventListener) {
+      screen.orientation.addEventListener('change', function () { setTimeout(updateRotateGate, 80); });
+    }
+  } catch (e) {}
   document.addEventListener('fullscreenchange', fitShell);
   document.addEventListener('webkitfullscreenchange', fitShell);
 
   $('btn-save').addEventListener('click', saveStateNow);
   $('btn-load').addEventListener('click', loadStateNow);
+  $('rotate-skip').addEventListener('click', function () {
+    // Salida manual: se respeta mientras dure la sesión.
+    rotateDismissed = true;
+    updateRotateGate();
+  });
 
   /* --- Pantalla completa ---------------------------------------------
      Los navegadores solo la permiten dentro de un gesto del usuario, y los
@@ -712,14 +852,17 @@ document.addEventListener('DOMContentLoaded', function () {
       fsEverEntered = true;
       setFsChip(false);
       fsBind(false);
+      lockPortrait();
     } else {
       if (fsEverEntered) fsUserExited = true;   // salida voluntaria (Esc o gesto)
+      unlockPortrait();
       setFsChip(true);                          // poder volver a entrar
       fsBind(false);
     }
     // El área visible cambia durante/después de la transición
     setTimeout(fitShell, 60);
     setTimeout(fitShell, 400);
+    setTimeout(updateRotateGate, 100);
   }
 
   document.addEventListener('fullscreenchange', onFsChange);
