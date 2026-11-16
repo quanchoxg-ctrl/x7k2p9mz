@@ -828,6 +828,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function tryFs() {
     if (fsUserExited || isFullscreen()) return;
+    // Con el aviso de rotación en pantalla no se secuestra el gesto:
+    // pulsar "Continuar en horizontal" no debe forzar la vertical.
+    if ($('rotate').classList.contains('show')) return;
     resumeAudio();
     goFullscreen();
     // Si el navegador ignoró la petición, damos una salida manual.
