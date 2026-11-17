@@ -93,18 +93,11 @@ body{
 }
 .lcd-wrap{position:relative;width:320px;aspect-ratio:160/144;flex-shrink:0}
 #lcd{
-  display:block;width:100%;height:100%;background:#9bbc0f;
+  display:block;width:100%;height:100%;background:#000;
   image-rendering:pixelated;image-rendering:crisp-edges;
   border-radius:5px 5px 5px 14px;
-  box-shadow:0 0 0 2px #2a2a32,0 0 26px rgba(140,180,20,.12),inset 0 0 22px rgba(0,0,0,.28);
+  box-shadow:0 0 0 2px #2a2a32,0 0 26px rgba(0,0,0,.35);
 }
-/* shader del LCD: dibuja el canvas real con la rejilla y los 4 verdes del DMG */
-#fx{
-  position:absolute;inset:0;width:100%;height:100%;display:none;
-  border-radius:5px 5px 5px 14px;pointer-events:none;background:#9bbc0f;
-  z-index:1;
-}
-.lcd-wrap.fx-on #fx{display:block}
 /* reflejo del cristal: el detalle mas reconocible del DMG */
 .lcd-wrap .glass{
   position:absolute;inset:0;border-radius:5px 5px 5px 14px;pointer-events:none;z-index:2;
@@ -295,7 +288,6 @@ body{
         <div class="bezel-label">Dot Matrix with Stereo Sound</div>
         <div class="lcd-wrap">
           <canvas id="lcd" width="160" height="144"></canvas>
-          <canvas id="fx"></canvas>
           <span class="glass"></span>
         </div>
         <div class="bezel-foot"><span id="led"></span><span>Battery</span></div>
@@ -912,155 +904,6 @@ function toast(msg) {
 }
 
 /* =========================================================
-   Shader del LCD: verdes del DMG, rejilla de puntos y sangrado
-   ========================================================= */
-var fxCanvas = null, fxGl = null, fxProgram = null, fxTex = null;
-var fxTexSizeLoc = null, fxFailed = false;
-
-var FX_VERT = [
-  'attribute vec2 aPos;',
-  'varying vec2 vUv;',
-  'void main() {',
-  '  vUv = vec2(aPos.x * 0.5 + 0.5, aPos.y * 0.5 + 0.5);',
-  '  gl_Position = vec4(aPos, 0.0, 1.0);',
-  '}'
-].join('\n');
-
-var FX_FRAG = [
-  'precision mediump float;',
-  'varying vec2 vUv;',
-  'uniform sampler2D uTex;',
-  'uniform vec2 uTexSize;',
-  'const vec3 DMG0 = vec3(0.059, 0.220, 0.059);',   // #0f380f
-  'const vec3 DMG1 = vec3(0.188, 0.384, 0.188);',   // #306230
-  'const vec3 DMG2 = vec3(0.545, 0.675, 0.059);',   // #8bac0f
-  'const vec3 DMG3 = vec3(0.608, 0.737, 0.059);',   // #9bbc0f
-  'float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }',
-  'vec3 dmgPalette(float l) {',
-  '  float a = smoothstep(0.28, 0.34, l);',
-  '  float b = smoothstep(0.52, 0.58, l);',
-  '  float c = smoothstep(0.76, 0.82, l);',
-  '  vec3 col = mix(DMG0, DMG1, a);',
-  '  col = mix(col, DMG2, b);',
-  '  col = mix(col, DMG3, c);',
-  '  return col;',
-  '}',
-  'void main() {',
-  '  vec2 texel = 1.0 / uTexSize;',
-  // Centro exacto del píxel lógico (160x144) para no mezclar vecinos.
-  '  vec2 uv = (floor(vUv * uTexSize) + 0.5) * texel;',
-  '  float l = luma(texture2D(uTex, uv).rgb);',
-  // Sangrado del LCD: los píxeles vecinos iluminan un poco al actual.
-  '  float nb = luma(texture2D(uTex, uv + vec2(texel.x, 0.0)).rgb)',
-  '           + luma(texture2D(uTex, uv - vec2(texel.x, 0.0)).rgb)',
-  '           + luma(texture2D(uTex, uv + vec2(0.0, texel.y)).rgb)',
-  '           + luma(texture2D(uTex, uv - vec2(0.0, texel.y)).rgb);',
-  '  l = mix(l, nb * 0.25, 0.14);',
-  // Rejilla de puntos de la matriz (separación entre celdas).
-  '  vec2 cell = fract(vUv * uTexSize);',
-  '  vec2 edge = abs(cell - 0.5) * 2.0;',
-  '  float m = max(edge.x, edge.y);',
-  '  float grid = 1.0 - smoothstep(0.70, 1.0, m) * 0.20;',
-  // Viñeta suave y tinte cálido del panel.
-  '  vec2 d = vUv - 0.5;',
-  '  float vig = 1.0 - dot(d, d) * 0.30;',
-  '  vec3 col = dmgPalette(l) * grid * vig;',
-  '  col *= vec3(1.02, 1.0, 0.92);',
-  '  gl_FragColor = vec4(col, 1.0);',
-  '}'
-].join('\n');
-
-function initFX() {
-  fxCanvas = $('fx');
-  var src = $('lcd');
-  if (!fxCanvas || !src) return;
-  var gl = null;
-  try {
-    gl = fxCanvas.getContext('webgl', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false })
-      || fxCanvas.getContext('experimental-webgl');
-  } catch (e) { gl = null; }
-  if (!gl) { fxFailed = true; return; }   // sin WebGL queda el canvas 2D normal
-
-  function compile(type, source) {
-    var sh = gl.createShader(type);
-    gl.shaderSource(sh, source);
-    gl.compileShader(sh);
-    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-      console.warn('[GB] shader:', gl.getShaderInfoLog(sh));
-      return null;
-    }
-    return sh;
-  }
-  var vs = compile(gl.VERTEX_SHADER, FX_VERT);
-  var fs = compile(gl.FRAGMENT_SHADER, FX_FRAG);
-  if (!vs || !fs) { fxFailed = true; return; }
-  var prog = gl.createProgram();
-  gl.attachShader(prog, vs);
-  gl.attachShader(prog, fs);
-  gl.linkProgram(prog);
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-    console.warn('[GB] shader link:', gl.getProgramInfoLog(prog));
-    fxFailed = true;
-    return;
-  }
-  gl.useProgram(prog);
-
-  var buf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-  var aPos = gl.getAttribLocation(prog, 'aPos');
-  gl.enableVertexAttribArray(aPos);
-  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
-
-  fxTex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, fxTex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-  gl.uniform1i(gl.getUniformLocation(prog, 'uTex'), 0);
-
-  fxTexSizeLoc = gl.getUniformLocation(prog, 'uTexSize');
-  fxGl = gl;
-  fxProgram = prog;
-  fxCanvas.parentNode.classList.add('fx-on');
-  layoutFX();
-  requestAnimationFrame(fxLoop);
-}
-
-// El shader dibuja a resolución real del dispositivo, no a 160x144.
-function layoutFX() {
-  if (!fxCanvas || fxFailed) return;
-  if (!fxCanvas.parentNode.classList.contains('fx-on')) return;
-  var rect = fxCanvas.parentNode.getBoundingClientRect();
-  var dpr = Math.min(window.devicePixelRatio || 1, 2.5);
-  var w = Math.round(rect.width * dpr);
-  var h = Math.round(rect.height * dpr);
-  if (w < 32 || h < 32) return;
-  var MAXW = 1440;
-  if (w > MAXW) { h = Math.round(h * MAXW / w); w = MAXW; }
-  if (fxCanvas.width !== w || fxCanvas.height !== h) {
-    fxCanvas.width = w;
-    fxCanvas.height = h;
-  }
-}
-
-function fxLoop() {
-  requestAnimationFrame(fxLoop);
-  if (!fxGl || fxFailed || document.hidden) return;
-  var gl = fxGl, src = $('lcd');
-  if (!src || !src.width || !src.height || !fxCanvas.width) return;
-  gl.viewport(0, 0, fxCanvas.width, fxCanvas.height);
-  gl.useProgram(fxProgram);
-  gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, fxTex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
-  gl.uniform2f(fxTexSizeLoc, src.width, src.height);
-  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-}
-
-/* =========================================================
    Escalado de la carcasa
    ========================================================= */
 function fitShell() {
@@ -1076,7 +919,6 @@ function fitShell() {
   // proporción original 360:610. Solo se reduce si no cabe a lo alto.
   var s = Math.min((vw - 4) / 360, (vh - bar - 4) / 610, 3);
   gb.style.transform = 'scale(' + (s > 0 ? s : 0.2) + ')';
-  layoutFX();
 }
 
 /* =========================================================
@@ -1084,7 +926,6 @@ function fitShell() {
    ========================================================= */
 document.addEventListener('DOMContentLoaded', function () {
   setupInput();
-  initFX();
   fitShell();
   updateRotateGate();
   window.addEventListener('resize', fitShell);
