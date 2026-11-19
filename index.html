@@ -29,7 +29,7 @@ body{
   background:
     radial-gradient(130% 75% at 50% -12%,#25262f 0%,#14141c 44%,#08080c 100%);
 }
-#app{height:100dvh;display:flex;flex-direction:column;align-items:center;gap:0;padding:0 0 4px}
+#app{position:relative;height:100dvh;display:flex;flex-direction:column;align-items:center;gap:0;padding:0 0 4px}
 
 /* ---------- barra superior ---------- */
 #topbar{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;flex-shrink:0;z-index:5;padding:7px 6px 5px}
@@ -45,6 +45,22 @@ body{
    automático no funcionó, y se resalta para que no haya duda. */
 #btn-fs{border-color:#41603a;color:#d2e7a2;background:#172015}
 #btn-fs:hover:not(:disabled){background:#1e2a1a;color:#eaf6c7}
+
+/* Selector de juegos: solo aparece cuando hay mas de uno disponible. */
+#game-list{
+  position:absolute;top:42px;left:50%;transform:translateX(-50%);z-index:9;
+  background:#16161d;border:1px solid #2c2c38;border-radius:8px;padding:6px;
+  display:flex;flex-direction:column;gap:4px;min-width:152px;
+  box-shadow:0 12px 26px rgba(0,0,0,.55);
+}
+#game-list[hidden]{display:none}
+#game-list button{
+  appearance:none;background:#1c1c24;border:1px solid #2c2c38;color:#c3c3cf;
+  font:600 11px/1 system-ui,sans-serif;text-align:left;padding:9px 10px;
+  border-radius:6px;cursor:pointer;
+}
+#game-list button:hover{background:#22222e;color:#fff}
+#game-list button[aria-current="true"]{border-color:#41603a;color:#d2e7a2}
 
 #stage{flex:1;display:grid;place-items:center;min-height:0;width:100%;overflow:hidden}
 
@@ -277,10 +293,12 @@ body{
 
 <div id="app">
   <div id="topbar">
+    <button class="tb" id="btn-games" hidden>Juegos</button>
     <button class="tb" id="btn-save" disabled>Guardar</button>
     <button class="tb" id="btn-load" disabled>Cargar</button>
     <button class="tb" id="btn-fs" hidden>Pantalla completa</button>
   </div>
+  <div id="game-list" hidden></div>
 
   <div id="stage">
     <div id="gb">
@@ -534,9 +552,52 @@ function resumeAudio() {
    Estado
    ========================================================= */
 var $ = function (id) { return document.getElementById(id); };
-var KEY_STATE = 'PBY_FREEZE_V1';
-var KEY_ROM = 'PBY_FREEZE_ROM';
-var ROM_URL = 'amarillo.gb';
+
+/* =========================================================
+   Juegos disponibles
+   Cada entrada lleva su ROM y sus guardados. Las ranuras con
+   ready:false no se muestran hasta que se les asigne un archivo.
+   Se elige con ?game=id (o #id), así que cada NFC puede abrir
+   directamente su juego sin pantalla de inicio.
+   ========================================================= */
+var GAMES = [
+  { id: 'amarillo', title: 'Pokémon Amarillo', file: 'amarillo.gb', ready: true },
+  { id: 'juego2', title: 'Juego 2', file: '', ready: false },
+  { id: 'juego3', title: 'Juego 3', file: '', ready: false },
+  { id: 'juego4', title: 'Juego 4', file: '', ready: false },
+  { id: 'juego5', title: 'Juego 5', file: '', ready: false },
+  { id: 'juego6', title: 'Juego 6', file: '', ready: false }
+];
+
+function requestedGameId() {
+  var id = '';
+  try { id = new URLSearchParams(location.search).get('game') || ''; } catch (e) {}
+  if (!id && location.hash) id = location.hash.slice(1);
+  return id;
+}
+function findGame(id) {
+  for (var i = 0; i < GAMES.length; i++) {
+    if (GAMES[i].id === id && GAMES[i].ready) return GAMES[i];
+  }
+  return null;
+}
+var currentGame = findGame(requestedGameId()) || GAMES[0];
+
+function stateKey(id) { return 'PBY_FREEZE_V1:' + id; }
+function romKey(id) { return 'PBY_FREEZE_ROM:' + id; }
+
+// Conserva la partida de la versión anterior (claves sin sufijo).
+if (!localStorage.getItem(stateKey(currentGame.id)) && localStorage.getItem('PBY_FREEZE_V1')) {
+  localStorage.setItem(stateKey(currentGame.id), localStorage.getItem('PBY_FREEZE_V1'));
+  localStorage.setItem(romKey(currentGame.id), localStorage.getItem('PBY_FREEZE_ROM'));
+}
+
+// El título de la pestaña y de la pantalla de inicio sigue al juego activo.
+document.title = currentGame.title;
+var appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+if (appleTitle) appleTitle.content = currentGame.title;
+
+var romCache = {};
 var romString = null;
 var romBytes = null;
 var started = false;
@@ -605,11 +666,49 @@ function setupInput() {
 }
 
 /* =========================================================
+   Selector de juegos
+   ========================================================= */
+function setupGameMenu() {
+  var btn = $('btn-games');
+  var list = $('game-list');
+  if (!btn || !list) return;
+  var games = GAMES.filter(function (g) { return g.ready; });
+  if (games.length < 2) return;            // con uno solo no se ve nada
+
+  btn.hidden = false;
+  games.forEach(function (g) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = g.title;
+    if (g.id === currentGame.id) b.setAttribute('aria-current', 'true');
+    b.addEventListener('click', function () {
+      if (started && gameboy) { try { saveSRAM(); } catch (e) {} }
+      location.href = location.pathname + '?game=' + encodeURIComponent(g.id);
+    });
+    list.appendChild(b);
+  });
+
+  btn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    list.hidden = !list.hidden;
+  });
+  document.addEventListener('click', function (e) {
+    if (!list.hidden && e.target !== btn && !list.contains(e.target)) list.hidden = true;
+  });
+}
+
+/* =========================================================
    ROM
    ========================================================= */
-async function fetchRom() {
-  if (romString) return romString;
-  var resp = await fetch(ROM_URL, { cache: 'no-cache' });
+async function fetchRom(file) {
+  file = file || currentGame.file;
+  if (!file) throw new Error('Este juego todavía no tiene ROM asignada');
+  if (romCache[file]) {
+    romBytes = romCache[file].bytes;
+    romString = romCache[file].str;
+    return romString;
+  }
+  var resp = await fetch(file, { cache: 'no-cache' });
   if (!resp.ok) throw new Error('ROM no encontrada (HTTP ' + resp.status + ')');
   var buf = await resp.arrayBuffer();
   romBytes = new Uint8Array(buf);
@@ -619,6 +718,7 @@ async function fetchRom() {
     parts.push(String.fromCharCode.apply(null, romBytes.subarray(i, Math.min(i + CHUNK, romBytes.length))));
   }
   romString = parts.join('');
+  romCache[file] = { bytes: romBytes, str: romString };
   return romString;
 }
 
@@ -639,13 +739,15 @@ function romId() {
 function syncRomState() {
   var id = romId();
   if (!id) return;
-  var prev = localStorage.getItem(KEY_ROM);
+  var keyRom = romKey(currentGame.id);
+  var keyState = stateKey(currentGame.id);
+  var prev = localStorage.getItem(keyRom);
   if (prev === id) return;
-  if (localStorage.getItem(KEY_STATE)) {
-    localStorage.removeItem(KEY_STATE);
+  if (localStorage.getItem(keyState)) {
+    localStorage.removeItem(keyState);
     toast('Partida congelada de la versión anterior descartada');
   }
-  localStorage.setItem(KEY_ROM, id);
+  localStorage.setItem(keyRom, id);
 }
 
 /* =========================================================
@@ -684,7 +786,7 @@ function startClockServo() {
 async function bootGame() {
   setBanner('Cargando…', 0);
   try {
-    var rom = await fetchRom();
+    var rom = await fetchRom(currentGame.file);
     setBanner('Iniciando…', 0);
     start($('lcd'), rom);
     startClockServo();
@@ -731,7 +833,7 @@ function saveStateNow() {
     var st = gameboy.saveState();
     st[0] = null;                       // la ROM no se guarda: se recupera del servidor
     var json = JSON.stringify(st);
-    localStorage.setItem(KEY_STATE, json);
+    localStorage.setItem(stateKey(currentGame.id), json);
     toast('Estado guardado · ' + Math.round(json.length / 1024) + ' KB');
   } catch (e) {
     toast('No se pudo guardar: ' + e.message);
@@ -739,11 +841,11 @@ function saveStateNow() {
 }
 
 async function loadStateNow() {
-  var json = localStorage.getItem(KEY_STATE);
+  var json = localStorage.getItem(stateKey(currentGame.id));
   if (!json) { toast('No hay ningún estado guardado'); return; }
   try {
-    await fetchRom();
-    if (localStorage.getItem(KEY_ROM) !== romId()) {
+    await fetchRom(currentGame.file);
+    if (localStorage.getItem(romKey(currentGame.id)) !== romId()) {
       toast('Ese estado es de otra versión del juego');
       return;
     }
@@ -926,6 +1028,7 @@ function fitShell() {
    ========================================================= */
 document.addEventListener('DOMContentLoaded', function () {
   setupInput();
+  setupGameMenu();
   fitShell();
   updateRotateGate();
   window.addEventListener('resize', fitShell);
