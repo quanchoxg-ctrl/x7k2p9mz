@@ -543,7 +543,7 @@ var $ = function (id) { return document.getElementById(id); };
    directamente su juego sin pantalla de inicio.
    ========================================================= */
 var GAMES = [
-  { id: 'amarillo', title: 'Pokémon Amarillo', file: 'amarillo.gb', ready: true },
+  { id: 'amarillo', title: 'Pokémon Amarillo', file: '', ready: true },
   { id: 'juego2', title: 'Juego 2', file: '', ready: false },
   { id: 'juego3', title: 'Juego 3', file: '', ready: false },
   { id: 'juego4', title: 'Juego 4', file: '', ready: false },
@@ -564,6 +564,65 @@ function findGame(id) {
   return null;
 }
 var currentGame = findGame(requestedGameId()) || GAMES[0];
+
+/* =========================================================
+   Descubrimiento automático de la ROM
+   El nombre del archivo no aparece en el código: se consulta la API
+   pública de GitHub para listar este directorio y se usa el primer
+   archivo .gb/.gbc que haya. El resultado se guarda en la sesión
+   para no repetir la petición en cada recarga.
+   ========================================================= */
+var ROM_DISCOVERY_CACHE = 'PBY_ROM_FILE:' + location.pathname;
+
+async function discoverRomFile() {
+  try {
+    var cached = sessionStorage.getItem(ROM_DISCOVERY_CACHE);
+    if (cached) return cached;
+  } catch (e) {}
+
+  var m = location.hostname.match(/^([^.]+)\.github\.io$/i);
+  var owner = m ? m[1] : 'quanchoxg-ctrl';
+  var parts = location.pathname.split('/').filter(Boolean);
+  if (!parts.length) return null;
+  var repo = decodeURIComponent(parts.shift());
+  // Si la URL termina en un archivo (p. ej. /index.html), se ignora.
+  while (parts.length && /\.[^/.]+$/.test(parts[parts.length - 1])) parts.pop();
+  var dir = parts.map(decodeURIComponent).join('/');
+
+  try {
+    var api = 'https://api.github.com/repos/' + encodeURIComponent(owner) + '/' +
+              encodeURIComponent(repo) + '/contents/' +
+              dir.split('/').map(encodeURIComponent).join('/');
+    var resp = await fetch(api, { cache: 'no-store' });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    var list = await resp.json();
+    if (!Array.isArray(list)) throw new Error('respuesta inesperada');
+    var rom = null;
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i];
+      if (item.type !== 'file') continue;
+      var name = item.name || '';
+      if (!/\.(gb|gbc)$/i.test(name)) continue;
+      // Si hay varios, se prefiere .gbc; si no, el primero que aparezca.
+      if (!rom || (/\.gbc$/i.test(name) && !/\.gbc$/i.test(rom))) rom = name;
+    }
+    if (!rom) throw new Error('no hay ningún .gb/.gbc en el directorio');
+    try { sessionStorage.setItem(ROM_DISCOVERY_CACHE, rom); } catch (e) {}
+    return rom;
+  } catch (e) {
+    console.warn('[GB] No se pudo descubrir la ROM:', e && e.message);
+    return null;
+  }
+}
+
+async function ensureRomFile() {
+  var found = await discoverRomFile();
+  if (found && currentGame && currentGame.file !== found) {
+    currentGame.file = found;
+    romCache = {};
+  }
+  return currentGame ? currentGame.file : null;
+}
 
 function stateKey(id) { return 'PBY_FREEZE_V1:' + id; }
 function romKey(id) { return 'PBY_FREEZE_ROM:' + id; }
@@ -652,7 +711,7 @@ function setupInput() {
    ========================================================= */
 async function fetchRom(file) {
   file = file || currentGame.file;
-  if (!file) throw new Error('Este juego todavía no tiene ROM asignada');
+  if (!file) throw new Error('No se encontró ningún archivo .gb/.gbc en el directorio');
   if (romCache[file]) {
     romBytes = romCache[file].bytes;
     romString = romCache[file].str;
@@ -734,6 +793,8 @@ function startClockServo() {
 }
 
 async function bootGame() {
+  setBanner('Buscando ROM…', 0);
+  await ensureRomFile();
   setBanner('Cargando…', 0);
   try {
     var rom = await fetchRom(currentGame.file);
