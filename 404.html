@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="robots" content="noindex">
+<title>Cargando…</title>
+</head>
+<body>
+<script>
+// GitHub Pages sirve esta página para rutas que no existen (como /a/1).
+// Guardamos la URL pedida y volvemos al index; el index la restaura con
+// history.replaceState para que la barra siga mostrando /x7k2p9mz/a/1.
+(function () {
+  try { sessionStorage.setItem('PBY_REDIRECT', location.href); } catch (e) {}
+  location.replace('/x7k2p9mz/index.html');
+})();
+</script>
+</body>
+</html>

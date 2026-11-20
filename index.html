@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
+<base href="/x7k2p9mz/">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -239,6 +240,41 @@ body{
 }
 #toast.show{opacity:1;transform:translate(-50%,0)}
 
+/* ---------- botón de juegos ---------- */
+#btn-games{border-color:#3a4f63;color:#bcd4e8;background:#15202a}
+#btn-games:hover:not(:disabled){background:#1d2b38;color:#fff}
+
+/* ---------- lista de juegos ---------- */
+#games-panel{
+  position:fixed;inset:0;z-index:70;display:none;
+  align-items:center;justify-content:center;padding:20px;
+  background:rgba(5,5,9,.78);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);
+}
+#games-panel.show{display:flex}
+.gp-card{
+  width:min(360px,100%);max-height:min(72vh,580px);display:flex;flex-direction:column;
+  background:#16161d;border:1px solid #34343f;border-radius:14px;overflow:hidden;
+  box-shadow:0 18px 50px rgba(0,0,0,.6);
+}
+.gp-head{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:13px 15px;border-bottom:1px solid #2c2c38;
+  color:#dcdcea;font:700 12px/1 system-ui;letter-spacing:.08em;text-transform:uppercase;
+}
+.gp-head button{
+  appearance:none;border:1px solid #34343f;background:#20202a;color:#c3c3cf;
+  width:26px;height:26px;border-radius:6px;cursor:pointer;font:600 13px/1 system-ui;
+}
+.gp-head button:hover{background:#2c2c38;color:#fff}
+.gp-list{overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:5px}
+.gp-item{
+  appearance:none;text-align:left;border:1px solid #2c2c38;background:#1c1c25;color:#c9c9d6;
+  font:600 12px/1.35 system-ui;padding:11px 12px;border-radius:8px;cursor:pointer;
+}
+.gp-item:hover{background:#262633;color:#fff}
+.gp-item.active{border-color:#41603a;background:#1b2718;color:#d2e7a2}
+.gp-empty{padding:22px 14px;text-align:center;color:#8f8f9e;font:500 12px/1.5 system-ui}
+
 /* ---------- aviso de rotación (respaldo si el sistema no deja fijarla) ---------- */
 #rotate{
   position:fixed;inset:0;z-index:80;display:none;
@@ -277,6 +313,7 @@ body{
 
 <div id="app">
   <div id="topbar">
+    <button class="tb" id="btn-games">Juegos</button>
     <button class="tb" id="btn-save" disabled>Guardar</button>
     <button class="tb" id="btn-load" disabled>Cargar</button>
     <button class="tb" id="btn-fs" hidden>Pantalla completa</button>
@@ -317,6 +354,16 @@ body{
 
       <div id="speaker"></div>
     </div>
+  </div>
+</div>
+
+<div id="games-panel">
+  <div class="gp-card">
+    <div class="gp-head">
+      <span>Juegos · Pack <span id="gp-pack">1</span></span>
+      <button id="gp-close" type="button" aria-label="Cerrar">×</button>
+    </div>
+    <div id="gp-list" class="gp-list"></div>
   </div>
 </div>
 
@@ -566,7 +613,107 @@ function findGame(id) {
 var currentGame = findGame(requestedGameId()) || GAMES[0];
 
 /* =========================================================
-   Descubrimiento automático de la ROM
+   Multijuego: ruta /a/<pack> + ROMs desde Google Drive
+   Un solo proyecto atiende varios packs. Al abrir /a/1 se
+   carga el pack 1. El listado y los ROMs vienen de un Web App
+   de Apps Script (JSONP, así que no hay problemas de CORS).
+   ========================================================= */
+(function () {
+  // La página 404.html guardó la URL original antes de traernos acá.
+  try {
+    var dest = sessionStorage.getItem('PBY_REDIRECT');
+    if (dest) {
+      sessionStorage.removeItem('PBY_REDIRECT');
+      history.replaceState(null, '', dest);
+    }
+  } catch (e) {}
+})();
+
+// PEGÁ ACÁ LA URL DEL WEB APP DE APPS SCRIPT (termina en /exec).
+var DRIVE_PROXY_URL = '';
+
+var CURRENT_PACK = (function () {
+  var m = location.pathname.match(/\/a\/(\d+)\/?$/);
+  return m ? parseInt(m[1], 10) : 1;
+})();
+
+var driveRoms = [];
+var __driveSeq = 0;
+
+function driveCall(params, timeoutMs) {
+  return new Promise(function (resolve, reject) {
+    if (!DRIVE_PROXY_URL) { reject(new Error('Falta configurar el proxy de Drive')); return; }
+    var cbName = '__gbDrive' + (++__driveSeq);
+    var s = document.createElement('script');
+    var timer = setTimeout(function () { done(); reject(new Error('Timeout consultando Drive')); }, timeoutMs || 30000);
+    function done() {
+      clearTimeout(timer);
+      if (s.parentNode) s.parentNode.removeChild(s);
+      try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
+    }
+    window[cbName] = function (data) {
+      done();
+      if (data && data.ok) resolve(data);
+      else reject(new Error((data && data.error) || 'Error en Drive'));
+    };
+    s.onerror = function () { done(); reject(new Error('No se pudo contactar el proxy de Drive')); };
+    var q = [];
+    for (var k in params) if (Object.prototype.hasOwnProperty.call(params, k)) q.push(encodeURIComponent(k) + '=' + encodeURIComponent(params[k]));
+    q.push('callback=' + encodeURIComponent(cbName));
+    s.src = DRIVE_PROXY_URL + (DRIVE_PROXY_URL.indexOf('?') >= 0 ? '&' : '?') + q.join('&');
+    document.head.appendChild(s);
+  });
+}
+
+function base64ToBytes(b64) {
+  var s = atob(b64);
+  var a = new Uint8Array(s.length);
+  for (var i = 0; i < s.length; i++) a[i] = s.charCodeAt(i);
+  return a;
+}
+
+function setRomBytes(name, bytes) {
+  var CHUNK = 0x8000, parts = [];
+  for (var i = 0; i < bytes.length; i += CHUNK) {
+    parts.push(String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + CHUNK, bytes.length))));
+  }
+  romBytes = bytes;
+  romString = parts.join('');
+  currentGame.file = name;
+  currentGame.id = 'pack' + CURRENT_PACK + ':' + name;
+  currentGame.title = name.replace(/\.(gb|gbc)$/i, '');
+  romCache[name] = { bytes: romBytes, str: romString };
+  document.title = currentGame.title;
+  var appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+  if (appleTitle) appleTitle.content = currentGame.title;
+}
+
+async function loadRomByName(name) {
+  var res = await driveCall({ action: 'rom', pack: CURRENT_PACK, name: name }, 90000);
+  var bytes = base64ToBytes(res.data || '');
+  if (bytes.length < 0x100) throw new Error('ROM inválida: ' + name);
+  setRomBytes(name, bytes);
+  return romString;
+}
+
+// Devuelve la ROM activa. Sin proxy configurado usa el fallback local
+// (autodetección de .gb/.gbc en el repo), para no romper el sitio actual.
+async function ensureRom() {
+  if (romBytes && romString && currentGame.file) return romString;
+  if (DRIVE_PROXY_URL) {
+    if (!driveRoms.length) {
+      var list = await driveCall({ action: 'list', pack: CURRENT_PACK });
+      driveRoms = list.roms || [];
+    }
+    if (!driveRoms.length) throw new Error('El pack ' + CURRENT_PACK + ' no tiene ROMs .gb/.gbc');
+    return await loadRomByName(driveRoms[0].name);
+  }
+  await ensureRomFile();
+  return await fetchRom(currentGame.file);
+}
+
+/* =========================================================
+   Descubrimiento automático de la ROM (fallback local)
    El nombre del archivo no aparece en el código: se consulta la API
    pública de GitHub para listar este directorio y se usa el primer
    archivo .gb/.gbc que haya. El resultado se guarda en la sesión
@@ -585,6 +732,8 @@ async function discoverRomFile() {
   var parts = location.pathname.split('/').filter(Boolean);
   if (!parts.length) return null;
   var repo = decodeURIComponent(parts.shift());
+  // /a/<pack> es una ruta virtual, no una carpeta real del repo.
+  if (parts.length && parts[0] === 'a' && /^\d+$/.test(parts[1] || '')) parts = parts.slice(2);
   // Si la URL termina en un archivo (p. ej. /index.html), se ignora.
   while (parts.length && /\.[^/.]+$/.test(parts[parts.length - 1])) parts.pop();
   var dir = parts.map(decodeURIComponent).join('/');
@@ -792,25 +941,88 @@ function startClockServo() {
   }, 1000);
 }
 
+function startWithRom(rom) {
+  setBanner('Iniciando…', 0);
+  start($('lcd'), rom);
+  startClockServo();
+  started = true;
+  paused = false;
+  setBar(true);
+  syncRomState();
+  // Si la página se abrió en horizontal en un móvil, el aviso de rotación
+  // ya está tapando el juego: se queda en pausa hasta que se gire.
+  if ($('rotate').classList.contains('show')) pauseGame();
+  if (!isInstalledApp()) setBanner('Toca la pantalla para pantalla completa', 3600);
+}
+
 async function bootGame() {
-  setBanner('Buscando ROM…', 0);
-  await ensureRomFile();
-  setBanner('Cargando…', 0);
+  setBanner('Buscando juegos…', 0);
   try {
-    var rom = await fetchRom(currentGame.file);
-    setBanner('Iniciando…', 0);
-    start($('lcd'), rom);
+    if (DRIVE_PROXY_URL) {
+      // Se carga el listado una vez: el botón "Juegos" ya lo reutiliza.
+      var list = await driveCall({ action: 'list', pack: CURRENT_PACK });
+      driveRoms = list.roms || [];
+    }
+    var rom = await ensureRom();
+    startWithRom(rom);
+  } catch (err) {
+    setBanner('Error: ' + err.message, 0, true);
+  }
+}
+
+/* =========================================================
+   Panel de juegos (botón de la barra superior)
+   ========================================================= */
+function openGames() {
+  renderGamesPanel();
+  $('games-panel').classList.add('show');
+}
+function closeGames() {
+  $('games-panel').classList.remove('show');
+}
+
+function renderGamesPanel() {
+  var list = $('gp-list');
+  if (!list) return;
+  $('gp-pack').textContent = CURRENT_PACK;
+  if (!DRIVE_PROXY_URL) {
+    list.innerHTML = '<div class="gp-empty">Configurá DRIVE_PROXY_URL en el index.html para cargar los packs desde Drive.</div>';
+    return;
+  }
+  if (!driveRoms.length) {
+    list.innerHTML = '<div class="gp-empty">Cargando…</div>';
+    return;
+  }
+  list.innerHTML = '';
+  driveRoms.forEach(function (r) {
+    var b = document.createElement('button');
+    b.className = 'gp-item' + (r.name === currentGame.file ? ' active' : '');
+    b.textContent = r.name.replace(/\.(gb|gbc)$/i, '') + '  ·  ' + Math.round(r.size / 1024) + ' KB';
+    b.addEventListener('click', function () { switchRom(r.name); });
+    list.appendChild(b);
+  });
+}
+
+async function switchRom(name) {
+  if (name === currentGame.file && started) { closeGames(); return; }
+  closeGames();
+  try {
+    setBanner('Cargando ' + name + '…', 0);
+    await loadRomByName(name);
+    if (gameboy) { try { clearLastEmulation(); } catch (e) {} }
+    gameboy = new GameBoyCore($('lcd'), romString);
+    gameboy.openMBC = openSRAM;
+    gameboy.openRTC = openRTC;
+    syncRomState();
     startClockServo();
+    run();
     started = true;
     paused = false;
     setBar(true);
-    syncRomState();
-    // Si la página se abrió en horizontal en un móvil, el aviso de rotación
-    // ya está tapando el juego: se queda en pausa hasta que se gire.
-    if ($('rotate').classList.contains('show')) pauseGame();
-    if (!isInstalledApp()) setBanner('Toca la pantalla para pantalla completa', 3600);
-  } catch (err) {
-    setBanner('Error: ' + err.message, 0, true);
+    setBanner(null);
+    toast('Juego: ' + name);
+  } catch (e) {
+    setBanner('Error: ' + e.message, 0, true);
   }
 }
 
@@ -855,7 +1067,7 @@ async function loadStateNow() {
   var json = localStorage.getItem(stateKey(currentGame.id));
   if (!json) { toast('No hay ningún estado guardado'); return; }
   try {
-    await fetchRom(currentGame.file);
+    await ensureRom();
     if (localStorage.getItem(romKey(currentGame.id)) !== romId()) {
       toast('Ese estado es de otra versión del juego');
       return;
@@ -1055,6 +1267,15 @@ document.addEventListener('DOMContentLoaded', function () {
   } catch (e) {}
   document.addEventListener('fullscreenchange', fitShell);
   document.addEventListener('webkitfullscreenchange', fitShell);
+
+  $('btn-games').addEventListener('click', openGames);
+  $('gp-close').addEventListener('click', closeGames);
+  $('games-panel').addEventListener('click', function (e) {
+    if (e.target === $('games-panel')) closeGames();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && $('games-panel').classList.contains('show')) closeGames();
+  });
 
   $('btn-save').addEventListener('click', saveStateNow);
   $('btn-load').addEventListener('click', loadStateNow);
