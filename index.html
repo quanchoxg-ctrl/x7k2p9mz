@@ -638,6 +638,79 @@ var CURRENT_PACK = (function () {
 var driveRoms = [];
 var zipCache = {};
 
+// PEGÁ ACÁ LA URL DEL WEB APP DE REGISTRO (termina en /exec).
+// Mientras esté vacío, la web funciona normal y no registra nada.
+var LOG_URL = '';
+
+/* =========================================================
+   Registro de accesos (Firehose silencioso a Google Sheets)
+   No bloquea el arranque: si falla, el juego sigue andando.
+   ========================================================= */
+async function fetchGeo() {
+  var out = { ip: '', city: '', country: '' };
+  try {
+    var a = await fetch('https://api.ipify.org?format=json', { cache: 'no-store' });
+    out.ip = (await a.json()).ip || '';
+  } catch (e) {}
+  try {
+    var b = await fetch('https://ipapi.co/json/', { cache: 'no-store' });
+    var j = await b.json();
+    out.city = j.city || '';
+    out.country = j.country_name || '';
+  } catch (e) {}
+  return out;
+}
+
+function uaInfo() {
+  var ua = navigator.userAgent || '';
+  var browser = /Edg\//.test(ua) ? 'Edge' :
+                /OPR\//.test(ua) ? 'Opera' :
+                /Chrome\//.test(ua) ? 'Chrome' :
+                /Firefox\//.test(ua) ? 'Firefox' :
+                /Safari\//.test(ua) ? 'Safari' : 'Otro';
+  var os = /Android/i.test(ua) ? 'Android' :
+           /iPhone|iPad|iPod/i.test(ua) ? 'iOS' :
+           /Windows/i.test(ua) ? 'Windows' :
+           /Mac/i.test(ua) ? 'Mac' :
+           /Linux/i.test(ua) ? 'Linux' : 'Otro';
+  var device = /iPad|Tablet/i.test(ua) ? 'Tablet' :
+               /Mobi|Android|iPhone/i.test(ua) ? 'Móvil' : 'Escritorio';
+  return { browser: browser, os: os, device: device, ua: ua };
+}
+
+async function logVisit(event, rom) {
+  if (!LOG_URL) return;
+  try {
+    var geo = await fetchGeo();
+    var ua = uaInfo();
+    var p = {
+      ts: new Date().toISOString(),
+      event: event || 'visita',
+      pack: CURRENT_PACK,
+      rom: rom || (currentGame && currentGame.file) || '',
+      page: location.href,
+      ref: document.referrer || '',
+      ip: geo.ip,
+      city: geo.city,
+      country: geo.country,
+      device: ua.device,
+      browser: ua.browser,
+      os: ua.os,
+      lang: navigator.language || '',
+      tz: (Intl.DateTimeFormat().resolvedOptions().timeZone) || '',
+      screen: (screen.width + 'x' + screen.height),
+      viewport: (window.innerWidth + 'x' + window.innerHeight),
+      ua: ua.ua
+    };
+    var q = [];
+    for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) {
+      q.push(encodeURIComponent(k) + '=' + encodeURIComponent(p[k]));
+    }
+    fetch(LOG_URL + (LOG_URL.indexOf('?') >= 0 ? '&' : '?') + q.join('&'),
+          { mode: 'no-cors', keepalive: true }).catch(function () {});
+  } catch (e) {}
+}
+
 // Estructura: a/<pack>/<pack>.zip  (ej. a/1/1.zip = pack 1, GBC)
 async function getPackZip(pack) {
   if (zipCache[pack]) return zipCache[pack];
@@ -949,6 +1022,7 @@ async function bootGame() {
     if (!driveRoms.length) throw new Error('El pack ' + CURRENT_PACK + ' no tiene ROMs .gb/.gbc');
     var rom = await ensureRom();
     startWithRom(rom);
+    logVisit('visita', currentGame.file);
   } catch (err) {
     // Si todavía no se subió el ZIP del pack, se mantiene la ROM local.
     try {
@@ -1012,6 +1086,7 @@ async function switchRom(name) {
     setBar(true);
     setBanner(null);
     toast('Juego: ' + name);
+    logVisit('cambio', name);
   } catch (e) {
     setBanner('Error: ' + e.message, 0, true);
   }
