@@ -995,13 +995,18 @@ async function switchRom(name) {
   try {
     setBanner('Cargando ' + name + '…', 0);
     await loadRomByName(name);
-    if (gameboy) { try { clearLastEmulation(); } catch (e) {} }
+    // Mismo orden que GameBoyIO.start(): hay que llamar a gameboy.start()
+    // para que inicialice memoria, LCD, sonido y cargue la ROM. Sin eso el
+    // core queda "faulted" y el intervalo de run() no arranca.
+    clearLastEmulation();
+    autoSave();                       // guarda la partida del juego anterior
     gameboy = new GameBoyCore($('lcd'), romString);
     gameboy.openMBC = openSRAM;
     gameboy.openRTC = openRTC;
+    gameboy.start();
+    run();
     syncRomState();
     startClockServo();
-    run();
     started = true;
     paused = false;
     setBar(true);
