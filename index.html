@@ -378,6 +378,7 @@ body{
 
 <script src="GameBoyCore.js"></script>
 <script src="GameBoyIO.js"></script>
+<script src="jszip.min.js"></script>
 <script>
 "use strict";
 
@@ -613,10 +614,10 @@ function findGame(id) {
 var currentGame = findGame(requestedGameId()) || GAMES[0];
 
 /* =========================================================
-   Multijuego: ruta /a/<pack> + ROMs desde Google Drive
+   Multijuego: ruta /a/<pack> + ROMs desde un ZIP en el repo
    Un solo proyecto atiende varios packs. Al abrir /a/1 se
-   carga el pack 1. El listado y los ROMs vienen de un Web App
-   de Apps Script (JSONP, así que no hay problemas de CORS).
+   carga el pack 1: se baja a/1/1.zip, se descomprime en el
+   navegador con JSZip y se listan sus archivos .gb/.gbc.
    ========================================================= */
 (function () {
   // La página 404.html guardó la URL original antes de traernos acá.
@@ -629,47 +630,34 @@ var currentGame = findGame(requestedGameId()) || GAMES[0];
   } catch (e) {}
 })();
 
-// PEGÁ ACÁ LA URL DEL WEB APP DE APPS SCRIPT (termina en /exec).
-var DRIVE_PROXY_URL = '';
-
 var CURRENT_PACK = (function () {
   var m = location.pathname.match(/\/a\/(\d+)\/?$/);
   return m ? parseInt(m[1], 10) : 1;
 })();
 
 var driveRoms = [];
-var __driveSeq = 0;
+var zipCache = {};
 
-function driveCall(params, timeoutMs) {
-  return new Promise(function (resolve, reject) {
-    if (!DRIVE_PROXY_URL) { reject(new Error('Falta configurar el proxy de Drive')); return; }
-    var cbName = '__gbDrive' + (++__driveSeq);
-    var s = document.createElement('script');
-    var timer = setTimeout(function () { done(); reject(new Error('Timeout consultando Drive')); }, timeoutMs || 30000);
-    function done() {
-      clearTimeout(timer);
-      if (s.parentNode) s.parentNode.removeChild(s);
-      try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
-    }
-    window[cbName] = function (data) {
-      done();
-      if (data && data.ok) resolve(data);
-      else reject(new Error((data && data.error) || 'Error en Drive'));
-    };
-    s.onerror = function () { done(); reject(new Error('No se pudo contactar el proxy de Drive')); };
-    var q = [];
-    for (var k in params) if (Object.prototype.hasOwnProperty.call(params, k)) q.push(encodeURIComponent(k) + '=' + encodeURIComponent(params[k]));
-    q.push('callback=' + encodeURIComponent(cbName));
-    s.src = DRIVE_PROXY_URL + (DRIVE_PROXY_URL.indexOf('?') >= 0 ? '&' : '?') + q.join('&');
-    document.head.appendChild(s);
-  });
+// Estructura: a/<pack>/<pack>.zip  (ej. a/1/1.zip = pack 1, GBC)
+async function getPackZip(pack) {
+  if (zipCache[pack]) return zipCache[pack];
+  var url = 'a/' + pack + '/' + pack + '.zip';
+  var resp = await fetch(url, { cache: 'no-cache' });
+  if (!resp.ok) throw new Error('No se encontró ' + url + ' (HTTP ' + resp.status + ')');
+  var zip = await JSZip.loadAsync(await resp.arrayBuffer());
+  zipCache[pack] = zip;
+  return zip;
 }
 
-function base64ToBytes(b64) {
-  var s = atob(b64);
-  var a = new Uint8Array(s.length);
-  for (var i = 0; i < s.length; i++) a[i] = s.charCodeAt(i);
-  return a;
+async function listPackRoms(pack) {
+  var zip = await getPackZip(pack);
+  var out = [];
+  zip.forEach(function (path, entry) {
+    if (entry.dir || !/\.(gb|gbc)$/i.test(path)) return;
+    out.push({ path: path, name: path.split('/').pop() });
+  });
+  out.sort(function (a, b) { return a.name.localeCompare(b.name); });
+  return out;
 }
 
 function setRomBytes(name, bytes) {
@@ -689,27 +677,25 @@ function setRomBytes(name, bytes) {
 }
 
 async function loadRomByName(name) {
-  var res = await driveCall({ action: 'rom', pack: CURRENT_PACK, name: name }, 90000);
-  var bytes = base64ToBytes(res.data || '');
+  var zip = await getPackZip(CURRENT_PACK);
+  var found = null;
+  zip.forEach(function (path, entry) {
+    if (!entry.dir && path.split('/').pop() === name) found = entry;
+  });
+  if (!found) throw new Error('ROM no encontrada: ' + name);
+  var bytes = await found.async('uint8array');
   if (bytes.length < 0x100) throw new Error('ROM inválida: ' + name);
   setRomBytes(name, bytes);
   return romString;
 }
 
-// Devuelve la ROM activa. Sin proxy configurado usa el fallback local
-// (autodetección de .gb/.gbc en el repo), para no romper el sitio actual.
+// Devuelve la ROM activa. Si el ZIP del pack no está, cae a la ROM local
+// del repo para no dejar el sitio fuera de servicio.
 async function ensureRom() {
   if (romBytes && romString && currentGame.file) return romString;
-  if (DRIVE_PROXY_URL) {
-    if (!driveRoms.length) {
-      var list = await driveCall({ action: 'list', pack: CURRENT_PACK });
-      driveRoms = list.roms || [];
-    }
-    if (!driveRoms.length) throw new Error('El pack ' + CURRENT_PACK + ' no tiene ROMs .gb/.gbc');
-    return await loadRomByName(driveRoms[0].name);
-  }
-  await ensureRomFile();
-  return await fetchRom(currentGame.file);
+  if (!driveRoms.length) driveRoms = await listPackRoms(CURRENT_PACK);
+  if (!driveRoms.length) throw new Error('El pack ' + CURRENT_PACK + ' no tiene ROMs .gb/.gbc');
+  return await loadRomByName(driveRoms[0].name);
 }
 
 /* =========================================================
@@ -958,15 +944,19 @@ function startWithRom(rom) {
 async function bootGame() {
   setBanner('Buscando juegos…', 0);
   try {
-    if (DRIVE_PROXY_URL) {
-      // Se carga el listado una vez: el botón "Juegos" ya lo reutiliza.
-      var list = await driveCall({ action: 'list', pack: CURRENT_PACK });
-      driveRoms = list.roms || [];
-    }
+    // Se abre el ZIP una sola vez: el botón "Juegos" reutiliza el listado.
+    driveRoms = await listPackRoms(CURRENT_PACK);
+    if (!driveRoms.length) throw new Error('El pack ' + CURRENT_PACK + ' no tiene ROMs .gb/.gbc');
     var rom = await ensureRom();
     startWithRom(rom);
   } catch (err) {
-    setBanner('Error: ' + err.message, 0, true);
+    // Si todavía no se subió el ZIP del pack, se mantiene la ROM local.
+    try {
+      await ensureRomFile();
+      startWithRom(await fetchRom(currentGame.file));
+    } catch (e2) {
+      setBanner('Error: ' + err.message, 0, true);
+    }
   }
 }
 
@@ -985,19 +975,15 @@ function renderGamesPanel() {
   var list = $('gp-list');
   if (!list) return;
   $('gp-pack').textContent = CURRENT_PACK;
-  if (!DRIVE_PROXY_URL) {
-    list.innerHTML = '<div class="gp-empty">Configurá DRIVE_PROXY_URL en el index.html para cargar los packs desde Drive.</div>';
-    return;
-  }
   if (!driveRoms.length) {
-    list.innerHTML = '<div class="gp-empty">Cargando…</div>';
+    list.innerHTML = '<div class="gp-empty">No hay ROMs en el pack ' + CURRENT_PACK + '.</div>';
     return;
   }
   list.innerHTML = '';
   driveRoms.forEach(function (r) {
     var b = document.createElement('button');
     b.className = 'gp-item' + (r.name === currentGame.file ? ' active' : '');
-    b.textContent = r.name.replace(/\.(gb|gbc)$/i, '') + '  ·  ' + Math.round(r.size / 1024) + ' KB';
+    b.textContent = r.name.replace(/\.(gb|gbc)$/i, '');
     b.addEventListener('click', function () { switchRom(r.name); });
     list.appendChild(b);
   });
